@@ -33,52 +33,108 @@ def analyze_image(image_url):
         pass
     return "Image received!"
 
-def analyze_message(message):
+import re
+from datetime import datetime
+
+def advanced_nlp_analysis(message):
+    """Advanced NLP with entity recognition and sentiment analysis"""
     
-    message_lower = message.lower()
+    message_lower = message.lower().strip()
     
-    # Define patterns for different issue types
+    # Enhanced pattern matching with confidence scores
     patterns = {
-        'pothole': ['pothole', 'road damage', 'street damage', 'hole in road', 'road hole', 'asphalt damage'],
-        'garbage': ['garbage', 'trash', 'rubbish', 'waste', 'dump', 'litter', 'cleanup', 'sanitation'],
-        'street_light': ['street light', 'streetlight', 'light out', 'dark street', 'lamp post', 'light pole'],
-        'water_issue': ['water', 'flood', 'leak', 'pipe', 'drainage', 'sewage', 'overflow'],
-        'traffic': ['traffic', 'congestion', 'signal', 'stop light', 'road block', 'accident'],
-        'noise': ['noise', 'loud', 'sound', 'disturbance', 'construction noise']
+        'pothole': {
+            'keywords': ['pothole', 'road damage', 'street damage', 'hole in road', 'road hole', 'asphalt damage', 'cracked road', 'road crack'],
+            'weight': 1.0,
+            'emergency': False
+        },
+        'garbage': {
+            'keywords': ['garbage', 'trash', 'rubbish', 'waste', 'dump', 'litter', 'cleanup', 'sanitation', 'overflowing bin', 'dumpster'],
+            'weight': 0.9,
+            'emergency': False
+        },
+        'street_light': {
+            'keywords': ['street light', 'streetlight', 'light out', 'dark street', 'lamp post', 'light pole', 'broken light', 'flickering light'],
+            'weight': 0.8,
+            'emergency': False
+        },
+        'water_issue': {
+            'keywords': ['water leak', 'flood', 'leak', 'pipe burst', 'drainage', 'sewage', 'overflow', 'water main', 'flooding'],
+            'weight': 1.0,
+            'emergency': True
+        },
+        'traffic': {
+            'keywords': ['traffic light', 'stop light', 'signal broken', 'road block', 'accident', 'car crash', 'congestion'],
+            'weight': 1.0,
+            'emergency': True
+        },
+        'graffiti': {
+            'keywords': ['graffiti', 'vandalism', 'spray paint', 'tagging', 'defaced'],
+            'weight': 0.7,
+            'emergency': False
+        }
     }
     
-    # Location keywords
-    location_keywords = ['at ', 'on ', 'near ', 'corner of', 'between', 'street', 'avenue', 'road', 'lane']
+    # Location extraction with multiple patterns
+    location_patterns = [
+        r'(?:at|on|near|around|beside|opposite)\s+([^,.!?]+)',
+        r'(\d+\s+\w+\s+(?:street|st|avenue|ave|road|rd|boulevard|blvd|lane|ln))',
+        r'(?:location|address)[:\s]+([^,.!?]+)',
+        r'in\s+([^,.!?]+?(?:area|neighborhood|district))'
+    ]
     
-    # Issue type
-    detected_issue = 'other'
-    confidence = 0
+    # Urgency detection
+    urgency_indicators = ['urgent', 'emergency', 'asap', 'immediately', 'critical', 'dangerous', 'hazard']
     
-    for issue_type, keywords in patterns.items():
-        for keyword in keywords:
+    # Analyze the message
+    detected_issues = []
+    location = 'Unknown'
+    urgency_level = 'normal'
+    
+    # Find issues with confidence scores
+    for issue_type, data in patterns.items():
+        for keyword in data['keywords']:
             if keyword in message_lower:
-                detected_issue = issue_type
-                confidence += 1
+                confidence = data['weight']
+                # Boost confidence if multiple keywords match
+                if sum(1 for k in data['keywords'] if k in message_lower) > 1:
+                    confidence += 0.2
+                
+                detected_issues.append({
+                    'type': issue_type,
+                    'confidence': min(confidence, 1.0),
+                    'emergency': data['emergency']
+                })
                 break
     
-    # Location extraction
-    location = 'Unknown'
-    for loc_keyword in location_keywords:
-        if loc_keyword in message_lower:
-            # Extract text after location keyword
-            start_idx = message_lower.find(loc_keyword) + len(loc_keyword)
-            location = message_lower[start_idx:].split('.')[0].split(',')[0].strip()
-            if len(location) > 30:  # If too long, truncate
-                location = location[:30] + "..."
-            break
+    # Extract location
+    for pattern in location_patterns:
+        matches = re.findall(pattern, message_lower, re.IGNORECASE)
+        if matches:
+            location = matches[0].strip()
+            if len(location) > 5:  # Reasonable location length
+                break
     
-    if detected_issue == 'other' and location != 'Unknown':
-        detected_issue = 'general_issue'
+    # Detect urgency
+    if any(indicator in message_lower for indicator in urgency_indicators):
+        urgency_level = 'high'
+    elif any(issue['emergency'] for issue in detected_issues):
+        urgency_level = 'medium'
+    
+    # Sort by confidence and get top issue
+    if detected_issues:
+        detected_issues.sort(key=lambda x: x['confidence'], reverse=True)
+        primary_issue = detected_issues[0]
+    else:
+        primary_issue = {'type': 'other', 'confidence': 0.0, 'emergency': False}
     
     return {
-        'category': detected_issue,
+        'primary_issue': primary_issue['type'],
+        'confidence': primary_issue['confidence'],
+        'all_issues': [issue['type'] for issue in detected_issues],
         'location': location.title() if location != 'Unknown' else 'Unknown',
-        'confidence': confidence
+        'urgency': urgency_level,
+        'needs_follow_up': primary_issue['emergency'] or urgency_level in ['high', 'medium']
     }
 
 def get_report_status(report_id):
@@ -389,39 +445,70 @@ def home():
 @app.route('/webhook', methods=['POST'])
 def webhook():
     incoming_msg = request.values.get('Body', '')
-    phone_number = request.values.get('From', '')
-    media = int(request.values.get('NumMedia', 0))
+    sender_phone = request.values.get('From', '')
+    num_media = int(request.values.get('NumMedia', 0))
 
-    print(f"Received message from {phone_number}: {incoming_msg}")
+    print(f"📩 Received from {sender_phone}: {incoming_msg}")
     
     resp = MessagingResponse()
     
-    # Use our free local AI analysis
-    analysis = analyze_message(incoming_msg)
-    issue_type = analysis['category']
+    # Use ADVANCED NLP analysis
+    analysis = advanced_nlp_analysis(incoming_msg)
+    issue_type = analysis['primary_issue']
     location = analysis['location']
+    confidence = analysis['confidence']
+    urgency_level = analysis['urgency']
+    all_issues = analysis['all_issues']
     
-    print(f"Analysis: {analysis}")
+    print(f"🤖 NLP Analysis: {analysis}")
 
-    if media > 0:
+    # Enhanced urgency handling
+    if urgency_level == 'high':
+        urgency_note = "🚨 URGENT: This has been flagged as high priority! "
+        priority_emoji = "🚨"
+    elif urgency_level == 'medium':
+        urgency_note = "⚠️ Priority: This issue has been elevated. "
+        priority_emoji = "⚠️"
+    else:
+        urgency_note = ""
+        priority_emoji = ""
+
+    # Enhanced response templates
+    response_templates = {
+        'pothole': f"{urgency_note}🕳️ Thank you for reporting the pothole at {{location}}! ",
+        'garbage': f"{urgency_note}🗑️ Thank you for reporting the garbage issue at {{location}}! ",
+        'water_issue': f"{urgency_note}💧 Thank you for reporting the water issue at {{location}}! ",
+        'traffic': f"{urgency_note}🚦 Thank you for reporting the traffic issue at {{location}}! ",
+        'street_light': f"{urgency_note}💡 Thank you for reporting the street light issue at {{location}}! ",
+        'graffiti': f"{urgency_note}🎨 Thank you for reporting the graffiti at {{location}}! ",
+        'other': f"{urgency_note}📋 Thank you for your report at {{location}}! ",
+    }
+
+    if num_media > 0:
+        # Handle image messages
         image_url = request.values.get('MediaUrl0')
-        report_id = save_report(phone_number, issue_type, incoming_msg, location, image_url)
+        print(f"🖼️ Processing image: {image_url}")
         
-        issue_responses = {
-            'pothole': f"🕳️ Thank you for reporting the pothole at {location}! Report ID: #{report_id}",
-            'garbage': f"🗑️ Thank you for reporting the garbage issue at {location}! Report ID: #{report_id}",
-            'street_light': f"💡 Thank you for reporting the street light issue at {location}! Report ID: #{report_id}",
-            'water_issue': f"💧 Thank you for reporting the water issue at {location}! Report ID: #{report_id}",
-            'traffic': f"🚦 Thank you for reporting the traffic issue at {location}! Report ID: #{report_id}",
-            'noise': f"🔊 Thank you for reporting the noise issue at {location}! Report ID: #{report_id}",
-            'general_issue': f"📋 Thank you for reporting the issue at {location}! Report ID: #{report_id}",
-            'other': f"📋 Thank you for your report! We've logged it with ID: #{report_id}"
-        }
+        # For now, use NLP analysis. Later we'll add computer vision here.
+        vision_note = "📸 Photo received! "
         
-        response_text = issue_responses.get(issue_type, issue_responses['other'])
-        if analysis['confidence'] == 0 and location == 'Unknown':
-            response_text += "\n\n💡 Tip: For faster service, include the location in your message!"
-            
+        report_id = save_report(sender_phone, issue_type, incoming_msg, location, image_url)
+        
+        # Build response
+        template = response_templates.get(issue_type, response_templates['other'])
+        response_text = f"{vision_note}{template.format(location=location)}"
+        response_text += f"\n\n📋 Report ID: #{report_id}"
+        
+        # Add confidence note if low confidence
+        if confidence < 0.6:
+            response_text += f"\n\n💡 Note: I'm {int(confidence*100)}% sure about the issue type."
+            if all_issues:
+                response_text += f" Could also be: {', '.join(all_issues[:2])}"
+        
+        # Add follow-up instructions for urgent issues
+        if analysis['needs_follow_up']:
+            response_text += f"\n\n{priority_emoji} This has been marked for immediate attention!"
+        
         msg = resp.message(response_text)
     
     elif incoming_msg.isdigit():
@@ -438,8 +525,8 @@ def webhook():
         else:
             msg = resp.message("❌ Report ID not found. Please check your report number.")
     
-    elif 'hello' in incoming_msg.lower() or 'hi' in incoming_msg.lower():
-        msg = resp.message("""Hello! I'm CivicBot 🤖
+    elif 'hello' in incoming_msg.lower() or 'hi' in incoming_msg.lower() or 'hey' in incoming_msg.lower():
+        msg = resp.message("""🤖 Hello! I'm CivicBot - your AI-powered community assistant!
 
 I can help you report:
 🕳️ Potholes & Road damage
@@ -447,26 +534,70 @@ I can help you report:
 💡 Street light problems
 💧 Water leaks & Flooding
 🚦 Traffic & Signal issues
-🔊 Noise disturbances
+🎨 Graffiti & Vandalism
 
-Just send a photo with a description and location!""")
+📸 *Send a photo with a description* for fastest service!
+📍 Include location like "on Main Street" or "near the park"
+
+Try: "There's a large pothole on Oak Street" + photo""")
     
     elif 'help' in incoming_msg.lower():
-        msg = resp.message("""🆘 **CivicBot Help**
+        msg = resp.message("""🆘 **CivicBot Help Guide**
 
-📸 **To report an issue:** Send a photo with a description
-Example: "Large pothole on Main Street near the park"
+📝 **How to Report:**
+• Send a photo + description
+• Include location in your message
+• Example: "Large pothole on Main Street near park"
 
-🔍 **Check status:** Send your report number
-Example: "123"
+🔍 **Check Status:**
+• Send your report number
+• Example: "123"
 
-📍 **Include location** for faster service!
-Example: "on Oak Avenue", "near city hall", "at 5th and Main"
+🚨 **Urgent Issues:**
+Use words like: *urgent, emergency, dangerous, asap*
 
-We support: potholes, garbage, street lights, water issues, traffic, noise, and more!""")
+📍 **Location Tips:**
+• "on Oak Avenue"
+• "near city hall" 
+• "at 5th and Main Street"
+• "in Central Park"
+
+📞 **Need human help?** Your report will be reviewed by our team!""")
+    
+    elif 'thank' in incoming_msg.lower():
+        msg = resp.message("""You're welcome! 😊 
+
+I'm here to help make our community better. Feel free to report any issues you see!""")
     
     else:
-        msg = resp.message("I can help you report civic issues! 📸 Send a photo of the problem with a description and location. Type 'help' for more options.")
+        # For text-only reports without images
+        if issue_type != 'other' or location != 'Unknown':
+            report_id = save_report(sender_phone, issue_type, incoming_msg, location)
+            
+            template = response_templates.get(issue_type, response_templates['other'])
+            response_text = template.format(location=location)
+            response_text += f"\n\n📋 Report ID: #{report_id}"
+            
+            # Add photo suggestion
+            response_text += "\n\n📸 *Tip: Next time include a photo for faster resolution!*"
+            
+            # Add confidence note
+            if confidence < 0.7:
+                response_text += f"\n💡 I'm {int(confidence*100)}% sure about the issue type."
+            
+            msg = resp.message(response_text)
+        else:
+            # Generic response for unclear messages
+            msg = resp.message("""🤔 I'm not sure what you'd like to report.
+
+Try sending:
+• A photo of the issue + description
+• Or be more specific like:
+  "Pothole on Main Street"
+  "Garbage overflowing on Oak Ave"
+  "Street light out at 5th Street"
+
+Type *help* for more options!""")
 
     return str(resp)
 
@@ -677,6 +808,132 @@ def admin_stats():
     
     return html
 
+
+@app.route('/map')
+def map_dashboard():
+    """Interactive map showing all reports"""
+    conn = sqlite3.connect('civicbot.db')
+    c = conn.cursor()
+    c.execute("SELECT * FROM reports WHERE latitude IS NOT NULL AND longitude IS NOT NULL")
+    reports = c.fetchall()
+    conn.close()
+    
+    # Convert reports to GeoJSON format
+    features = []
+    for report in reports:
+        feature = {
+            "type": "Feature",
+            "geometry": {
+                "type": "Point",
+                "coordinates": [report[7], report[6]]  # [lng, lat]
+            },
+            "properties": {
+                "id": report[0],
+                "issue_type": report[2],
+                "description": report[3],
+                "status": report[8],
+                "created_at": report[9]
+            }
+        }
+        features.append(feature)
+    
+    geojson = {
+        "type": "FeatureCollection",
+        "features": features
+    }
+    
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>CivicBot - Live Map</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+        <style>
+            #map {{ height: 600px; }}
+            .legend {{ background: white; padding: 10px; border-radius: 5px; }}
+            .legend-item {{ margin: 5px 0; }}
+        </style>
+    </head>
+    <body>
+        <div style="padding: 20px;">
+            <h1>🗺️ CivicBot Live Issue Map</h1>
+            <p>Real-time visualization of reported issues across the city</p>
+            <div id="map"></div>
+            <div style="margin-top: 20px;">
+                <a href="/admin" class="btn">📋 List View</a>
+                <a href="/admin/stats" class="btn">📊 Statistics</a>
+            </div>
+        </div>
+
+        <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+        <script>
+            // Initialize map
+            var map = L.map('map').setView([40.7128, -74.0060], 12); // Default to NYC
+            
+            // Add tile layer
+            L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+                attribution: '© OpenStreetMap contributors'
+            }}).addTo(map);
+            
+            // Add reports to map
+            var reports = {json.dumps(geojson)};
+            
+            var issueIcons = {{
+                'pothole': '🕳️',
+                'garbage': '🗑️', 
+                'water_issue': '💧',
+                'traffic': '🚦',
+                'graffiti': '🎨',
+                'street_light': '💡',
+                'other': '📋'
+            }};
+            
+            var statusColors = {{
+                'received': 'orange',
+                'in-progress': 'blue', 
+                'resolved': 'green'
+            }};
+            
+            reports.features.forEach(function(feature) {{
+                var icon = L.divIcon({{
+                    html: issueIcons[feature.properties.issue_type] || '📋',
+                    className: 'custom-icon',
+                    iconSize: [30, 30]
+                }});
+                
+                var marker = L.marker([
+                    feature.geometry.coordinates[1],
+                    feature.geometry.coordinates[0]
+                ], {{icon: icon}}).addTo(map);
+                
+                marker.bindPopup(`
+                    <h3>${{issueIcons[feature.properties.issue_type]}} Report #${{feature.properties.id}}</h3>
+                    <p><strong>Type:</strong> ${{feature.properties.issue_type}}</p>
+                    <p><strong>Status:</strong> <span style="color: ${{statusColors[feature.properties.status]}}">${{feature.properties.status}}</span></p>
+                    <p><strong>Description:</strong> ${{feature.properties.description}}</p>
+                    <p><strong>Reported:</strong> ${{feature.properties.created_at}}</p>
+                    <a href="/admin" target="_blank">View Details</a>
+                `);
+            }});
+            
+            // Add legend
+            var legend = L.control({{position: 'bottomright'}});
+            legend.onAdd = function(map) {{
+                var div = L.DomUtil.create('div', 'legend');
+                div.innerHTML = '<h4>Issue Types</h4>';
+                for (var issue in issueIcons) {{
+                    div.innerHTML += '<div class="legend-item">' + issueIcons[issue] + ' ' + issue + '</div>';
+                }}
+                return div;
+            }};
+            legend.addTo(map);
+        </script>
+    </body>
+    </html>
+    """
+    
+
 @app.route('/debug-routes')
 def debug_routes():
     routes = []
@@ -723,6 +980,3 @@ def update_status():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
-
-
-
