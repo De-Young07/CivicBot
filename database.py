@@ -1,6 +1,7 @@
 import sqlite3
 import datetime
 
+
 def init_db():
     conn = sqlite3.connect('civicbot.db')
     c = conn.cursor()
@@ -10,22 +11,24 @@ def init_db():
                   issue_type TEXT,
                   description TEXT,
                   location TEXT,
+                  latitude REAL,
+                  longitude REAL,
                   image_url TEXT,
                   status TEXT DEFAULT 'received',
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     conn.commit()
     conn.close()
-    print("✅ Database initialized!")
+    print("✅ Database initialized with geolocation support!")
 
-def save_report(phone, issue_type, description, location, image_url=None):
+def save_report(phone, issue_type, description, location, image_url=None, lat=None, lng=None):
     conn = sqlite3.connect('civicbot.db')
     c = conn.cursor()
-    c.execute("INSERT INTO reports (phone, issue_type, description, location, image_url) VALUES (?, ?, ?, ?, ?)",
-              (phone, issue_type, description, location, image_url))
+    c.execute("INSERT INTO reports (phone, issue_type, description, location, image_url, latitude, longitude) VALUES (?, ?, ?, ?, ?, ?, ?)",
+              (phone, issue_type, description, location, image_url, lat, lng))
     conn.commit()
     report_id = c.lastrowid
     conn.close()
-    print(f"✅ Report saved with ID: {report_id}, Image: {image_url is not None}")
+    print(f"✅ Report saved with ID: {report_id}, Location: {lat},{lng}")
     return report_id
 
 def get_report_status(report_id):
