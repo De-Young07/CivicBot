@@ -701,6 +701,7 @@ def admin_dashboard():
     """
     return html
 
+
 @app.route('/admin/stats')
 def admin_stats():
     conn = sqlite3.connect('civicbot.db')
@@ -708,7 +709,7 @@ def admin_stats():
     
     # Get various statistics
     c.execute("SELECT COUNT(*) FROM reports")
-    total_reports = c.fetchone()[0]
+    total_reports = c.fetchone()[0] or 0  # Ensure it's never None
     
     c.execute("SELECT status, COUNT(*) FROM reports GROUP BY status")
     status_stats = dict(c.fetchall())
@@ -716,10 +717,16 @@ def admin_stats():
     c.execute("SELECT issue_type, COUNT(*) FROM reports GROUP BY issue_type")
     issue_stats = dict(c.fetchall())
     
-    c.execute("SELECT COUNT(*) FROM reports WHERE image_url IS NOT NULL")
-    reports_with_images = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM reports WHERE image_url IS NOT NULL AND image_url != ''")
+    reports_with_images = c.fetchone()[0] or 0
     
     conn.close()
+    
+    # Safe percentage calculations
+    if total_reports > 0:
+        image_percentage = (reports_with_images / total_reports) * 100
+    else:
+        image_percentage = 0
     
     # FIXED: Proper string formatting for CSS
     html = f"""
@@ -754,6 +761,13 @@ def admin_stats():
                 border-radius: 4px;
                 margin-right: 10px;
             }}
+            .empty-state {{
+                background: white;
+                padding: 40px;
+                text-align: center;
+                border-radius: 10px;
+                margin: 20px 0;
+            }}
         </style>
     </head>
     <body>
@@ -761,10 +775,22 @@ def admin_stats():
             <h1>📊 CivicBot Analytics</h1>
             <div class="nav">
                 <a href="/admin">📋 View All Reports</a>
+                <a href="/map">🗺️ View Map</a>
                 <a href="/">🏠 Home</a>
             </div>
         </div>
-        
+    """
+    
+    if total_reports == 0:
+        html += """
+        <div class="empty-state">
+            <h2>📊 No Reports Yet</h2>
+            <p>When users start sending reports via WhatsApp, statistics will appear here.</p>
+            <p>Try sending a message to your bot to create the first report!</p>
+        </div>
+        """
+    else:
+        html += f"""
         <div class="stat">
             <h3>📈 Total Reports</h3>
             <p style="font-size: 24px; font-weight: bold; color: #007bff;">{total_reports}</p>
@@ -772,42 +798,44 @@ def admin_stats():
         
         <div class="stat">
             <h3>📸 Reports with Photos</h3>
-            <p style="font-size: 20px; color: #28a745;">{reports_with_images} ({reports_with_images/total_reports*100:.1f}% of total)</p>
+            <p style="font-size: 20px; color: #28a745;">{reports_with_images} ({image_percentage:.1f}% of total)</p>
         </div>
         
         <div class="stat">
             <h3>📊 Status Distribution</h3>
             <ul>
-    """
-    
-    # Add status statistics
-    for status, count in status_stats.items():
-        percentage = (count / total_reports) * 100 if total_reports > 0 else 0
-        html += f'<li><strong>{status.title()}:</strong> {count} reports ({percentage:.1f}%)</li>'
-    
-    html += """
+        """
+        
+        # Add status statistics
+        for status, count in status_stats.items():
+            percentage = (count / total_reports) * 100
+            html += f'<li><strong>{status.title()}:</strong> {count} reports ({percentage:.1f}%)</li>'
+        
+        html += """
             </ul>
         </div>
         
         <div class="stat">
             <h3>🔧 Issue Types</h3>
             <ul>
-    """
-    
-    # Add issue type statistics
-    for issue_type, count in issue_stats.items():
-        percentage = (count / total_reports) * 100 if total_reports > 0 else 0
-        html += f'<li><strong>{issue_type.title()}:</strong> {count} reports ({percentage:.1f}%)</li>'
-    
-    html += """
+        """
+        
+        # Add issue type statistics
+        for issue_type, count in issue_stats.items():
+            percentage = (count / total_reports) * 100
+            html += f'<li><strong>{issue_type.title()}:</strong> {count} reports ({percentage:.1f}%)</li>'
+        
+        html += """
             </ul>
         </div>
+        """
+    
+    html += """
     </body>
     </html>
     """
     
     return html
-
 
 @app.route('/map')
 def map_dashboard():
