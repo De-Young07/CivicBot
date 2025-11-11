@@ -1,21 +1,32 @@
+# database.py
 import sqlite3
 import datetime
-
 
 def init_db():
     conn = sqlite3.connect('civicbot.db')
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS reports
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  phone TEXT, 
-                  issue_type TEXT,
-                  description TEXT,
-                  location TEXT,
-                  latitude REAL,
-                  longitude REAL,
-                  image_url TEXT,
-                  status TEXT DEFAULT 'received',
-                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+             (id INTEGER PRIMARY KEY AUTOINCREMENT,
+              phone TEXT, 
+              issue_type TEXT,
+              description TEXT,
+              location TEXT,
+              latitude REAL,
+              longitude REAL,
+              image_url TEXT,
+              status TEXT DEFAULT 'received',
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
+    try:
+        c.execute("ALTER TABLE reports ADD COLUMN latitude REAL")
+    except sqlite3.OperationalError:
+        pass 
+    
+    try:
+        c.execute("ALTER TABLE reports ADD COLUMN longitude REAL")
+    except sqlite3.OperationalError:
+        pass 
+    
     conn.commit()
     conn.close()
     print("✅ Database initialized with geolocation support!")
@@ -30,6 +41,14 @@ def save_report(phone, issue_type, description, location, image_url=None, lat=No
     conn.close()
     print(f"✅ Report saved with ID: {report_id}, Location: {lat},{lng}")
     return report_id
+
+def get_all_reports():
+    conn = sqlite3.connect('civicbot.db')
+    c = conn.cursor()
+    c.execute("SELECT * FROM reports ORDER BY created_at DESC")
+    reports = c.fetchall()
+    conn.close()
+    return reports
 
 def get_report_status(report_id):
     conn = sqlite3.connect('civicbot.db')
