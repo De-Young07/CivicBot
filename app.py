@@ -842,31 +842,55 @@ def map_dashboard():
     """Interactive map showing all reports"""
     conn = sqlite3.connect('civicbot.db')
     c = conn.cursor()
-    c.execute("SELECT * FROM reports WHERE latitude IS NOT NULL AND longitude IS NOT NULL")
+    
+    # Check if we have the new columns
+    c.execute("PRAGMA table_info(reports)")
+    columns = [column[1] for column in c.fetchall()]
+    
+    if 'latitude' in columns and 'longitude' in columns:
+        c.execute("SELECT * FROM reports WHERE latitude IS NOT NULL AND longitude IS NOT NULL")
+    else:
+        c.execute("SELECT * FROM reports")
+    
     reports = c.fetchall()
     conn.close()
     
-    # Convert reports to GeoJSON format
+    import json
+    
+    # For now, use demo coordinates if no real data exists
+    demo_coordinates = [
+        [40.7128, -74.0060],  # NYC
+        [40.7589, -73.9851],  # Times Square
+        [40.6892, -74.0445],  # Statue of Liberty
+    ]
+    
     features = []
-    for report in reports:
+    for i, report in enumerate(reports):
+        # Use demo coordinates if no real coordinates
+        if len(report) > 7 and report[6] is not None and report[7] is not None:
+            lat, lng = report[6], report[7]
+        else:
+            # Use demo coordinates in round-robin fashion
+            lat, lng = demo_coordinates[i % len(demo_coordinates)]
+        
         feature = {
             "type": "Feature",
             "geometry": {
-                "type": "Point",
-                "coordinates": [report[7], report[6]]  # [lng, lat]
+                "type": "Point", 
+                "coordinates": [lng, lat]  # GeoJSON uses [longitude, latitude]
             },
             "properties": {
                 "id": report[0],
                 "issue_type": report[2],
                 "description": report[3],
-                "status": report[8],
-                "created_at": report[9]
+                "status": report[8] if len(report) > 8 else 'received',
+                "created_at": report[9] if len(report) > 9 else 'Unknown'
             }
         }
         features.append(feature)
     
     geojson = {
-        "type": "FeatureCollection",
+        "type": "FeatureCollection", 
         "features": features
     }
     
