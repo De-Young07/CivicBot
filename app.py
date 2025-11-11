@@ -6,13 +6,6 @@ import requests
 import json
 import os
 
-if os.path.exists('.env'):
-    try:
-        from dotenv import load_dotenv
-        load_dotenv()
-        print("✅ Loaded local .env file")
-    except ImportError:
-        print("⚠️ python-dotenv not available, using environment variables")
 
 app = Flask(__name__)
 
