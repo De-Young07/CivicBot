@@ -5,6 +5,10 @@ import sqlite3
 import requests
 import json
 import os
+import re
+import base64
+import json
+from datetime import datetime
 
 
 app = Flask(__name__)
@@ -12,22 +16,144 @@ app = Flask(__name__)
 init_db()
 
 
-def analyze_image(image_url):
-    """Basic image analysis - you can enhance this with proper AI services"""
-    try:
-        response = requests.get(image_url)
-        if response.status_code == 200:
-            file_size = len(response.content) / 1024  # Size in KB
-            if file_size > 100:  # If image is reasonably large
-                return "✅ Image quality appears good for analysis"
-            else:
-                return "⚠️ Image might be blurry or low quality"
-    except:
-        pass
-    return "Image received!"
 
-import re
-from datetime import datetime
+def analyze_image_with_vision(image_url):
+    """Analyze images using Google Cloud Vision API"""
+    try:
+        # Download image
+        response = requests.get(image_url)
+        if response.status_code != 200:
+            return {"error": "Could not download image"}
+        
+        # Encode image for Vision API
+        image_content = base64.b64encode(response.content).decode('utf-8')
+        
+        # Get API key from environment
+        api_key = os.environ.get('GOOGLE_VISION_API_KEY')
+        
+        if not api_key:
+            return basic_image_analysis(response.content)
+        
+        # Google Vision API request
+        vision_url = f"https://vision.googleapis.com/v1/images:annotate?key={api_key}"
+        
+        payload = {
+            "requests": [
+                {
+                    "image": {"content": image_content},
+                    "features": [
+                        {"type": "LABEL_DETECTION", "maxResults": 10},
+                        {"type": "OBJECT_LOCALIZATION", "maxResults": 10},
+                        {"type": "SAFE_SEARCH_DETECTION", "maxResults": 5}
+                    ]
+                }
+            ]
+        }
+        
+        vision_response = requests.post(vision_url, json=payload)
+        
+        if vision_response.status_code == 200:
+            return parse_vision_results(vision_response.json())
+        else:
+            print(f"Vision API error: {vision_response.status_code} - {vision_response.text}")
+            return basic_image_analysis(response.content)
+        
+    except Exception as e:
+        print(f"Vision analysis error: {e}")
+        return basic_image_analysis(response.content if 'response' in locals() else None)
+
+def basic_image_analysis(image_content):
+    """Fallback image analysis when no API available"""
+    if not image_content:
+        return {"analysis_source": "basic", "detected_issues": []}
+    
+    file_size_kb = len(image_content) / 1024
+    
+    analysis = {
+        "analysis_source": "basic",
+        "file_size_kb": round(file_size_kb, 1),
+        "quality": "good" if file_size_kb > 100 else "poor",
+        "detected_issues": [],
+        "safe_for_work": True
+    }
+    
+    return analysis
+
+def parse_vision_results(vision_data):
+    """Parse Google Vision API results for civic issues"""
+    try:
+        if 'responses' not in vision_data or not vision_data['responses']:
+            return {"analysis_source": "vision_api", "detected_issues": []}
+        
+        response = vision_data['responses'][0]
+        labels = response.get('labelAnnotations', [])
+        objects = response.get('localizedObjectAnnotations', [])
+        safe_search = response.get('safeSearchAnnotation', {})
+        
+        detected_issues = []
+        confidence_threshold = 0.7
+        
+        # Enhanced issue mapping with multiple keywords
+        issue_mapping = {
+            'pothole': ['pothole', 'road', 'asphalt', 'pavement', 'damage', 'crack'],
+            'garbage': ['garbage', 'trash', 'litter', 'waste', 'rubbish', 'dumpster', 'bin'],
+            'graffiti': ['graffiti', 'vandalism', 'spray paint', 'tagging', 'wall writing'],
+            'water_issue': ['water', 'flood', 'leak', 'flooding', 'pool', 'puddle'],
+            'vehicle': ['car', 'vehicle', 'automobile', 'accident', 'traffic'],
+            'street_light': ['street light', 'lamp', 'light pole', 'streetlight', 'lamp post'],
+            'infrastructure': ['building', 'structure', 'construction', 'scaffolding']
+        }
+        
+        # Analyze labels
+        for label in labels:
+            label_text = label['description'].lower()
+            confidence = label['score']
+            
+            for issue_type, keywords in issue_mapping.items():
+                if any(keyword in label_text for keyword in keywords) and confidence > confidence_threshold:
+                    detected_issues.append({
+                        'type': issue_type,
+                        'confidence': confidence,
+                        'source': f"label: {label_text}",
+                        'score': confidence
+                    })
+        
+        # Analyze objects
+        for obj in objects:
+            object_name = obj['name'].lower()
+            confidence = obj['score']
+            
+            for issue_type, keywords in issue_mapping.items():
+                if any(keyword in object_name for keyword in keywords) and confidence > confidence_threshold:
+                    detected_issues.append({
+                        'type': issue_type,
+                        'confidence': confidence,
+                        'source': f"object: {object_name}",
+                        'score': confidence
+                    })
+        
+        # Remove duplicates and sort by confidence
+        unique_issues = {}
+        for issue in detected_issues:
+            if issue['type'] not in unique_issues or issue['score'] > unique_issues[issue['type']]['score']:
+                unique_issues[issue['type']] = issue
+        
+        detected_issues = list(unique_issues.values())
+        detected_issues.sort(key=lambda x: x['score'], reverse=True)
+        
+        return {
+            "analysis_source": "google_vision_api",
+            "detected_issues": detected_issues,
+            "primary_issue": detected_issues[0]['type'] if detected_issues else 'unknown',
+            "safe_for_work": safe_search.get('adult', 'UNKNOWN') in ['VERY_UNLIKELY', 'UNLIKELY'],
+            "confidence": detected_issues[0]['score'] if detected_issues else 0
+        }
+        
+    except Exception as e:
+        print(f"Error parsing vision results: {e}")
+        return {"analysis_source": "vision_api", "detected_issues": [], "error": str(e)}
+
+
 
 def advanced_nlp_analysis(message):
     """Advanced NLP with entity recognition and sentiment analysis"""
@@ -129,6 +255,41 @@ def advanced_nlp_analysis(message):
         'urgency': urgency_level,
         'needs_follow_up': primary_issue['emergency'] or urgency_level in ['high', 'medium']
     }
+
+def geocode_location(location_text):
+    """Convert location text to latitude/longitude using OpenStreetMap Nominatim"""
+    try:
+        if location_text.lower() in ['unknown', '', 'none']:
+            return None, None
+            
+        # Use OpenStreetMap Nominatim API (free)
+        base_url = "https://nominatim.openstreetmap.org/search"
+        params = {
+            'q': f"{location_text}",
+            'format': 'json',
+            'limit': 1
+        }
+        
+        headers = {
+            'User-Agent': 'CivicBot/1.0 (Community Service Reporting System)'
+        }
+        
+        response = requests.get(base_url, params=params, headers=headers)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data:
+                lat = float(data[0]['lat'])
+                lon = float(data[0]['lon'])
+                print(f"📍 Geocoded '{location_text}' to {lat}, {lon}")
+                return lat, lon
+        
+        print(f"❌ Could not geocode: {location_text}")
+        return None, None
+        
+    except Exception as e:
+        print(f"Geocoding error: {e}")
+        return None, None
 
 def get_report_status(report_id):
     conn = sqlite3.connect('civicbot.db')
@@ -477,32 +638,56 @@ def webhook():
         'other': f"{urgency_note}📋 Thank you for your report at {{location}}! ",
     }
 
-    if num_media > 0:
-        # Handle image messages
-        image_url = request.values.get('MediaUrl0')
-        print(f"🖼️ Processing image: {image_url}")
-        
-        # For now, use NLP analysis. Later we'll add computer vision here.
-        vision_note = "📸 Photo received! "
-        
-        report_id = save_report(sender_phone, issue_type, incoming_msg, location, image_url)
-        
-        # Build response
-        template = response_templates.get(issue_type, response_templates['other'])
-        response_text = f"{vision_note}{template.format(location=location)}"
-        response_text += f"\n\n📋 Report ID: #{report_id}"
-        
-        # Add confidence note if low confidence
-        if confidence < 0.6:
-            response_text += f"\n\n💡 Note: I'm {int(confidence*100)}% sure about the issue type."
-            if all_issues:
-                response_text += f" Could also be: {', '.join(all_issues[:2])}"
-        
-        # Add follow-up instructions for urgent issues
-        if analysis['needs_follow_up']:
-            response_text += f"\n\n{priority_emoji} This has been marked for immediate attention!"
-        
-        msg = resp.message(response_text)
+    # In your webhook function, replace the image processing section:
+if num_media > 0:
+    image_url = request.values.get('MediaUrl0')
+    print(f"🖼️ Processing image: {image_url}")
+    
+    # Analyze the image with Computer Vision
+    vision_analysis = analyze_image_with_vision(image_url)
+    print(f"👁️ Vision Analysis: {vision_analysis}")
+    
+    # Combine NLP and Vision analysis intelligently
+    nlp_confidence = analysis['confidence']
+    vision_confidence = vision_analysis.get('confidence', 0)
+    
+    if (vision_analysis.get('primary_issue') and 
+        vision_analysis['primary_issue'] != 'unknown' and 
+        vision_confidence > 0.6 and 
+        vision_confidence > nlp_confidence):
+        # Vision analysis is more confident, use it
+        final_issue_type = vision_analysis['primary_issue']
+        analysis_source = " (AI Image Analysis)"
+        confidence_note = f"👁️ AI Vision is {int(vision_confidence*100)}% confident"
+    else:
+        # Use NLP analysis
+        final_issue_type = analysis['primary_issue']
+        analysis_source = " (Text Analysis)"
+        confidence_note = f"🤖 AI Text is {int(nlp_confidence*100)}% confident"
+    
+    
+    lat, lng = geocode_location(location)
+    report_id = save_report(sender_phone, final_issue_type, incoming_msg, location, image_url, lat, lng)    
+    
+    # Build enhanced response
+    template = response_templates.get(final_issue_type, response_templates['other'])
+    response_text = f"📸 {urgency_note}Image analyzed{analysis_source}!\n"
+    response_text += template.format(location=location)
+    response_text += f"\n\n📋 Report ID: #{report_id}"
+    response_text += f"\n{confidence_note}"
+    
+    # Add vision insights if available
+    if vision_analysis.get('detected_issues'):
+        vision_issues = [issue['type'] for issue in vision_analysis['detected_issues'][:3]]
+        unique_issues = list(set(vision_issues))
+        if len(unique_issues) > 1:
+            response_text += f"\n\n🔍 AI detected: {', '.join(unique_issues)}"
+    
+    # Add follow-up for urgent issues
+    if analysis['needs_follow_up']:
+        response_text += f"\n\n{priority_emoji} This has been marked for immediate attention!"
+    
+    msg = resp.message(response_text)
     
     elif incoming_msg.isdigit():
         # Status checking feature
@@ -832,143 +1017,167 @@ def admin_stats():
 
 @app.route('/map')
 def map_dashboard():
-    """Interactive map showing all reports"""
+    """Interactive map showing all reports with real geolocation"""
     conn = sqlite3.connect('civicbot.db')
     c = conn.cursor()
     
-    # Check if we have the new columns
-    c.execute("PRAGMA table_info(reports)")
-    columns = [column[1] for column in c.fetchall()]
-    
-    if 'latitude' in columns and 'longitude' in columns:
-        c.execute("SELECT * FROM reports WHERE latitude IS NOT NULL AND longitude IS NOT NULL")
-    else:
-        c.execute("SELECT * FROM reports")
-    
+    # Get reports with coordinates
+    c.execute("""
+        SELECT id, issue_type, description, location, latitude, longitude, status, created_at, image_url 
+        FROM reports 
+        WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+        ORDER BY created_at DESC
+    """)
     reports = c.fetchall()
     conn.close()
     
-    import json
-    
-    # For now, use demo coordinates if no real data exists
-    demo_coordinates = [
-        [40.7128, -74.0060],  # NYC
-        [40.7589, -73.9851],  # Times Square
-        [40.6892, -74.0445],  # Statue of Liberty
-    ]
-    
+    # Convert to GeoJSON
     features = []
-    for i, report in enumerate(reports):
-        # Use demo coordinates if no real coordinates
-        if len(report) > 7 and report[6] is not None and report[7] is not None:
-            lat, lng = report[6], report[7]
-        else:
-            # Use demo coordinates in round-robin fashion
-            lat, lng = demo_coordinates[i % len(demo_coordinates)]
-        
+    for report in reports:
         feature = {
             "type": "Feature",
             "geometry": {
-                "type": "Point", 
-                "coordinates": [lng, lat]  # GeoJSON uses [longitude, latitude]
+                "type": "Point",
+                "coordinates": [report[5], report[4]]  # [lng, lat]
             },
             "properties": {
                 "id": report[0],
-                "issue_type": report[2],
-                "description": report[3],
-                "status": report[8] if len(report) > 8 else 'received',
-                "created_at": report[9] if len(report) > 9 else 'Unknown'
+                "issue_type": report[1],
+                "description": report[2],
+                "location": report[3],
+                "status": report[6],
+                "created_at": report[7],
+                "has_image": bool(report[8])
             }
         }
         features.append(feature)
     
-    geojson = {
-        "type": "FeatureCollection", 
+    geojson_data = json.dumps({
+        "type": "FeatureCollection",
         "features": features
-    }
+    })
     
-    return f"""
+    return f'''
     <!DOCTYPE html>
     <html>
     <head>
-        <title>CivicBot - Live Map</title>
+        <title>CivicBot - Live Issue Map</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
         <style>
-            #map {{ height: 600px; }}
-            .legend {{ background: white; padding: 10px; border-radius: 5px; }}
-            .legend-item {{ margin: 5px 0; }}
+            #map {{ height: 70vh; width: 100%; }}
+            body {{ margin: 0; font-family: Arial, sans-serif; }}
+            .header {{ background: #2c3e50; color: white; padding: 20px; }}
+            .controls {{ background: #34495e; padding: 15px; color: white; }}
+            .legend {{ background: white; padding: 10px; border-radius: 5px; position: absolute; bottom: 20px; right: 20px; z-index: 1000; }}
+            .cluster-marker {{ background: #e74c3c; color: white; border-radius: 50%; text-align: center; font-weight: bold; }}
         </style>
     </head>
     <body>
-        <div style="padding: 20px;">
+        <div class="header">
             <h1>🗺️ CivicBot Live Issue Map</h1>
-            <p>Real-time visualization of reported issues across the city</p>
-            <div id="map"></div>
-            <div style="margin-top: 20px;">
-                <a href="/admin" class="btn">📋 List View</a>
-                <a href="/admin/stats" class="btn">📊 Statistics</a>
-            </div>
+            <p>Real-time visualization of community reports with AI analysis</p>
+        </div>
+        
+        <div class="controls">
+            <a href="/admin" style="color: white; margin-right: 15px;">📋 List View</a>
+            <a href="/admin/stats" style="color: white; margin-right: 15px;">📊 Statistics</a>
+            <a href="/" style="color: white;">🏠 Home</a>
         </div>
 
+        <div id="map"></div>
+
         <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+        <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+        <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+        
         <script>
             // Initialize map
-            var map = L.map('map').setView([40.7128, -74.0060], 12); // Default to NYC
+            var map = L.map('map').setView([7.97156, 3.613074], 12);
             
             // Add tile layer
             L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
                 attribution: '© OpenStreetMap contributors'
             }}).addTo(map);
             
-            // Add reports to map
-            var reports = {json.dumps(geojson)};
+            // Create marker cluster group
+            var markers = L.markerClusterGroup();
             
-            var issueIcons = {{
-                'pothole': '🕳️',
-                'garbage': '🗑️', 
-                'water_issue': '💧',
-                'traffic': '🚦',
-                'graffiti': '🎨',
-                'street_light': '💡',
-                'other': '📋'
+            // Issue type icons and colors
+            var issueStyles = {{
+                'pothole': {{icon: '🕳️', color: '#e74c3c'}},
+                'garbage': {{icon: '🗑️', color: '#f39c12'}},
+                'water_issue': {{icon: '💧', color: '#3498db'}},
+                'traffic': {{icon: '🚦', color: '#9b59b6'}},
+                'street_light': {{icon: '💡', color: '#f1c40f'}},
+                'graffiti': {{icon: '🎨', color: '#e67e22'}},
+                'other': {{icon: '📋', color: '#95a5a6'}}
             }};
             
             var statusColors = {{
-                'received': 'orange',
-                'in-progress': 'blue', 
-                'resolved': 'green'
+                'received': '#f39c12',
+                'in-progress': '#3498db',
+                'resolved': '#27ae60'
             }};
             
+            // Add reports to map
+            var reports = {geojson_data};
+            
             reports.features.forEach(function(feature) {{
+                var style = issueStyles[feature.properties.issue_type] || issueStyles['other'];
+                var statusColor = statusColors[feature.properties.status] || '#95a5a6';
+                
+                // Create custom icon
                 var icon = L.divIcon({{
-                    html: issueIcons[feature.properties.issue_type] || '📋',
-                    className: 'custom-icon',
-                    iconSize: [30, 30]
+                    html: `<div style="background: ${{statusColor}}; color: white; border: 3px solid ${{style.color}}; border-radius: 50%; width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; font-size: 18px;">${{style.icon}}</div>`,
+                    className: 'custom-marker',
+                    iconSize: [40, 40],
+                    iconAnchor: [20, 20]
                 }});
                 
                 var marker = L.marker([
                     feature.geometry.coordinates[1],
                     feature.geometry.coordinates[0]
-                ], {{icon: icon}}).addTo(map);
+                ], {{icon: icon}});
                 
-                marker.bindPopup(`
-                    <h3>${{issueIcons[feature.properties.issue_type]}} Report #${{feature.properties.id}}</h3>
-                    <p><strong>Type:</strong> ${{feature.properties.issue_type}}</p>
-                    <p><strong>Status:</strong> <span style="color: ${{statusColors[feature.properties.status]}}">${{feature.properties.status}}</span></p>
-                    <p><strong>Description:</strong> ${{feature.properties.description}}</p>
-                    <p><strong>Reported:</strong> ${{feature.properties.created_at}}</p>
-                    <a href="/admin" target="_blank">View Details</a>
-                `);
+                // Create popup content
+                var popupContent = `
+                    <div style="min-width: 250px;">
+                        <h3>${{style.icon}} Report #${{feature.properties.id}}</h3>
+                        <p><strong>Type:</strong> ${{feature.properties.issue_type}}</p>
+                        <p><strong>Status:</strong> <span style="color: ${{statusColor}}; font-weight: bold;">${{feature.properties.status}}</span></p>
+                        <p><strong>Location:</strong> ${{feature.properties.location}}</p>
+                        <p><strong>Description:</strong> ${{feature.properties.description}}</p>
+                        <p><strong>Reported:</strong> ${{new Date(feature.properties.created_at).toLocaleDateString()}}</p>
+                        ${{feature.properties.has_image ? '<p>📸 <em>Includes photo evidence</em></p>' : ''}}
+                        <div style="margin-top: 10px;">
+                            <a href="/admin" target="_blank" style="background: #3498db; color: white; padding: 5px 10px; text-decoration: none; border-radius: 3px;">View Details</a>
+                        </div>
+                    </div>
+                `;
+                
+                marker.bindPopup(popupContent);
+                markers.addLayer(marker);
             }});
+            
+            map.addLayer(markers);
+            
+            // Auto-fit map to show all markers
+            if (reports.features.length > 0) {{
+                map.fitBounds(markers.getBounds(), {{ padding: [20, 20] }});
+            }}
             
             // Add legend
             var legend = L.control({{position: 'bottomright'}});
             legend.onAdd = function(map) {{
                 var div = L.DomUtil.create('div', 'legend');
                 div.innerHTML = '<h4>Issue Types</h4>';
-                for (var issue in issueIcons) {{
-                    div.innerHTML += '<div class="legend-item">' + issueIcons[issue] + ' ' + issue + '</div>';
+                for (var issue in issueStyles) {{
+                    div.innerHTML += '<div style="margin: 5px 0;"><span style="font-size: 20px; margin-right: 5px;">' + issueStyles[issue].icon + '</span> ' + issue + '</div>';
+                }}
+                div.innerHTML += '<h4 style="margin-top: 15px;">Status</h4>';
+                for (var status in statusColors) {{
+                    div.innerHTML += '<div style="margin: 5px 0;"><span style="display: inline-block; width: 15px; height: 15px; background: ' + statusColors[status] + '; margin-right: 5px;"></span> ' + status + '</div>';
                 }}
                 return div;
             }};
@@ -976,7 +1185,7 @@ def map_dashboard():
         </script>
     </body>
     </html>
-    """
+    '''
     
 
 @app.route('/debug-routes')
