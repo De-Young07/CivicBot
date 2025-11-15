@@ -618,10 +618,10 @@ def webhook():
 
     # Enhanced urgency handling
     if urgency_level == 'high':
-        urgency_note = "🚨 URGENT: This has been flagged as high priority! "
+        urgency_note = "URGENT: This has been flagged as high priority! "
         priority_emoji = "🚨"
     elif urgency_level == 'medium':
-        urgency_note = "⚠️ Priority: This issue has been elevated. "
+        urgency_note = "Priority: This issue has been elevated. "
         priority_emoji = "⚠️"
     else:
         urgency_note = ""
@@ -629,13 +629,13 @@ def webhook():
 
     # Enhanced response templates
     response_templates = {
-        'pothole': f"{urgency_note}🕳️ Thank you for reporting the pothole at {{location}}! ",
-        'garbage': f"{urgency_note}🗑️ Thank you for reporting the garbage issue at {{location}}! ",
-        'water_issue': f"{urgency_note}💧 Thank you for reporting the water issue at {{location}}! ",
-        'traffic': f"{urgency_note}🚦 Thank you for reporting the traffic issue at {{location}}! ",
-        'street_light': f"{urgency_note}💡 Thank you for reporting the street light issue at {{location}}! ",
-        'graffiti': f"{urgency_note}🎨 Thank you for reporting the graffiti at {{location}}! ",
-        'other': f"{urgency_note}📋 Thank you for your report at {{location}}! ",
+        'pothole': f"{urgency_note}Thank you for reporting the pothole at {{location}}! ",
+        'garbage': f"{urgency_note}Thank you for reporting the garbage issue at {{location}}! ",
+        'water_issue': f"{urgency_note}Thank you for reporting the water issue at {{location}}! ",
+        'traffic': f"{urgency_note}Thank you for reporting the traffic issue at {{location}}! ",
+        'street_light': f"{urgency_note}Thank you for reporting the street light issue at {{location}}! ",
+        'graffiti': f"{urgency_note}Thank you for reporting the graffiti at {{location}}! ",
+        'other': f"{urgency_note}Thank you for your report at {{location}}! ",
     }
 
     # In your webhook function, replace the image processing section:
@@ -645,7 +645,7 @@ if num_media > 0:
     
     # Analyze the image with Computer Vision
     vision_analysis = analyze_image_with_vision(image_url)
-    print(f"👁️ Vision Analysis: {vision_analysis}")
+    print(f"Vision Analysis: {vision_analysis}")
     
     # Combine NLP and Vision analysis intelligently
     nlp_confidence = analysis['confidence']
@@ -658,12 +658,12 @@ if num_media > 0:
         # Vision analysis is more confident, use it
         final_issue_type = vision_analysis['primary_issue']
         analysis_source = " (AI Image Analysis)"
-        confidence_note = f"👁️ AI Vision is {int(vision_confidence*100)}% confident"
+        confidence_note = f"AI Vision is {int(vision_confidence*100)}% confident"
     else:
         # Use NLP analysis
         final_issue_type = analysis['primary_issue']
         analysis_source = " (Text Analysis)"
-        confidence_note = f"🤖 AI Text is {int(nlp_confidence*100)}% confident"
+        confidence_note = f"AI Text is {int(nlp_confidence*100)}% confident"
     
     
     lat, lng = geocode_location(location)
@@ -671,9 +671,9 @@ if num_media > 0:
     
     # Build enhanced response
     template = response_templates.get(final_issue_type, response_templates['other'])
-    response_text = f"📸 {urgency_note}Image analyzed{analysis_source}!\n"
+    response_text = f"{urgency_note}Image analyzed{analysis_source}!\n"
     response_text += template.format(location=location)
-    response_text += f"\n\n📋 Report ID: #{report_id}"
+    response_text += f"\n\nReport ID: #{report_id}"
     response_text += f"\n{confidence_note}"
     
     # Add vision insights if available
@@ -695,55 +695,55 @@ if num_media > 0:
         if report_info:
             status, issue_type = report_info
             status_messages = {
-                'received': f"📋 Report #{incoming_msg} ({issue_type}) is received and awaiting review",
-                'in-progress': f"🔄 Report #{incoming_msg} ({issue_type}) is currently being addressed",
-                'resolved': f"✅ Report #{incoming_msg} ({issue_type}) has been resolved!"
+                'received': f"Report #{incoming_msg} ({issue_type}) is received and awaiting review",
+                'in-progress': f"Report #{incoming_msg} ({issue_type}) is currently being addressed",
+                'resolved': f"Report #{incoming_msg} ({issue_type}) has been resolved!"
             }
             msg = resp.message(status_messages.get(status, f"Report #{incoming_msg} status: {status}"))
         else:
             msg = resp.message("❌ Report ID not found. Please check your report number.")
     
     elif 'hello' in incoming_msg.lower() or 'hi' in incoming_msg.lower() or 'hey' in incoming_msg.lower():
-        msg = resp.message("""🤖 Hello! I'm CivicBot - your AI-powered community assistant!
+        msg = resp.message("""Hello! I'm CivicBot - your AI-powered community assistant!
 
 I can help you report:
-🕳️ Potholes & Road damage
-🗑️ Garbage & Sanitation issues  
-💡 Street light problems
-💧 Water leaks & Flooding
-🚦 Traffic & Signal issues
-🎨 Graffiti & Vandalism
+Potholes & Road damage
+Garbage & Sanitation issues  
+Street light problems
+Water leaks & Flooding
+Traffic & Signal issues
+Graffiti & Vandalism
 
-📸 *Send a photo with a description* for fastest service!
-📍 Include location like "on Main Street" or "near the park"
+*Send a photo with a description* for fastest service!
+Include location like "on Main Street" or "near the park"
 
-Try: "There's a large pothole on Oak Street" + photo""")
+Try: "There's a large pothole on Adebisi Street" + photo""")
     
     elif 'help' in incoming_msg.lower():
-        msg = resp.message("""🆘 **CivicBot Help Guide**
+        msg = resp.message("""*CivicBot Help Guide*
 
-📝 **How to Report:**
+📝*How to Report:*
 • Send a photo + description
 • Include location in your message
 • Example: "Large pothole on Main Street near park"
 
-🔍 **Check Status:**
+🔍 *Check Status:*
 • Send your report number
 • Example: "123"
 
-🚨 **Urgent Issues:**
+*Urgent Issues:*
 Use words like: *urgent, emergency, dangerous, asap*
 
-📍 **Location Tips:**
+📍*Location Tips:*
 • "on Oak Avenue"
 • "near city hall" 
 • "at 5th and Main Street"
 • "in Central Park"
 
-📞 **Need human help?** Your report will be reviewed by our team!""")
+📞*Need human help?* Your report will be reviewed by our team!""")
     
     elif 'thank' in incoming_msg.lower():
-        msg = resp.message("""You're welcome! 😊 
+        msg = resp.message("""You're welcome!😊 
 
 I'm here to help make our community better. Feel free to report any issues you see!""")
     
@@ -754,19 +754,19 @@ I'm here to help make our community better. Feel free to report any issues you s
             
             template = response_templates.get(issue_type, response_templates['other'])
             response_text = template.format(location=location)
-            response_text += f"\n\n📋 Report ID: #{report_id}"
+            response_text += f"\n\n📋Report ID: #{report_id}"
             
             # Add photo suggestion
-            response_text += "\n\n📸 *Tip: Next time include a photo for faster resolution!*"
+            response_text += "\n\n *Tip: Next time include a photo for faster resolution!*"
             
             # Add confidence note
             if confidence < 0.7:
-                response_text += f"\n💡 I'm {int(confidence*100)}% sure about the issue type."
+                response_text += f"\n I'm {int(confidence*100)}% sure about the issue type."
             
             msg = resp.message(response_text)
         else:
             # Generic response for unclear messages
-            msg = resp.message("""🤔 I'm not sure what you'd like to report.
+            msg = resp.message(""" I'm not sure what you'd like to report.
 
 Try sending:
 • A photo of the issue + description
@@ -851,21 +851,21 @@ def admin_dashboard():
             
             html += f"""
             <div class="report {status_class}">
-                <h3>📋 Report #{report_id} - {issue_type.title()}</h3>
-                <p><strong>📞 From:</strong> {phone}</p>
-                <p><strong>📝 Description:</strong> {description}</p>
-                <p><strong>📍 Location:</strong> {location}</p>
+                <h3>Report #{report_id} - {issue_type.title()}</h3>
+                <p><strong>From:</strong> {phone}</p>
+                <p><strong>Description:</strong> {description}</p>
+                <p><strong>Location:</strong> {location}</p>
                 {image_html}
-                <p><strong>🔄 Status:</strong> {status.upper()}</p>
-                <p><strong>📅 Submitted:</strong> {created_at}</p>
+                <p><strong>Status:</strong> {status.upper()}</p>
+                <p><strong>Submitted:</strong> {created_at}</p>
                 
                 <form action="/update_status" method="post" style="margin-top: 15px;">
                     <input type="hidden" name="report_id" value="{report_id}">
                     <label><strong>Update Status:</strong></label>
                     <select name="status">
-                        <option value="received" {'selected' if status=='received' else ''}>📥 Received</option>
-                        <option value="in-progress" {'selected' if status=='in-progress' else ''}>🔄 In Progress</option>
-                        <option value="resolved" {'selected' if status=='resolved' else ''}>✅ Resolved</option>
+                        <option value="received" {'selected' if status=='received' else ''}>Received</option>
+                        <option value="in-progress" {'selected' if status=='in-progress' else ''}>In Progress</option>
+                        <option value="resolved" {'selected' if status=='resolved' else ''}>Resolved</option>
                     </select>
                     <button type="submit" class="btn">Update</button>
                 </form>
@@ -1206,7 +1206,7 @@ def debug_routes():
 
 @app.route('/update_status', methods=['POST'])
 def update_status():
-    print(f"📨 Received form data: {dict(request.form)}")  # Debug line
+    print(f"Received form data: {dict(request.form)}")  # Debug line
     
     report_id = request.form.get('report_id')
     new_status = request.form.get('status')
@@ -1222,11 +1222,11 @@ def update_status():
     conn.commit()
     conn.close()
     
-    print(f"✅ Successfully updated report #{report_id}")
+    print(f"✅Successfully updated report #{report_id}")
     
     return f'''
     <script>
-        alert("✅ Status updated for report #{report_id}");
+        alert("✅Status updated for report #{report_id}");
         window.location.href = "/admin";
     </script>
     '''
