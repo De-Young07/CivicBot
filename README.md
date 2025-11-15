@@ -1,13 +1,13 @@
-# CivicBot 🤖
+# CivicBot
 
 AI-powered WhatsApp bot for community problem reporting.
 
 ## Features
-- 📱 WhatsApp integration
-- 🖼️ Image processing
-- 🤖 AI-powered issue classification
-- 📊 Admin dashboard
-- 🔍 Status tracking
+- WhatsApp integration
+- Image processing
+- AI-powered issue classification
+- Admin dashboard
+- Status tracking
 
 ## Setup
 1. Send `join [code]` to Twilio WhatsApp number
