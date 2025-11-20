@@ -1,6 +1,8 @@
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 from database import init_db, save_report
+from conversation_engine import ConversationEngine
+from ai_response_generator import AIResponseGenerator
 import sqlite3
 import requests
 import json
@@ -15,6 +17,8 @@ app = Flask(__name__)
 
 init_db()
 
+conversation_engine = ConversationEngine()
+ai_generator = AIResponseGenerator()
 
 
 def analyze_image_with_vision(image_url):
@@ -292,9 +296,10 @@ def geocode_location(location_text):
         return None, None
 
 def get_report_status(report_id):
+    """Get report status with department info"""
     conn = sqlite3.connect('civicbot.db')
     c = conn.cursor()
-    c.execute("SELECT status, issue_type FROM reports WHERE id = ?", (report_id,))
+    c.execute("SELECT status, issue_type, department FROM reports WHERE id = ?", (report_id,))
     result = c.fetchone()
     conn.close()
     return result
@@ -598,186 +603,104 @@ def home():
     
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    incoming_msg = request.values.get('Body', '')
+    incoming_msg = request.values.get('Body', '').strip()
     sender_phone = request.values.get('From', '')
     num_media = int(request.values.get('NumMedia', 0))
 
-    print(f"📩 Received from {sender_phone}: {incoming_msg}")
+    print(f"💬 Message from {sender_phone}: {incoming_msg}")
     
     resp = MessagingResponse()
     
-    # Use ADVANCED NLP analysis
-    analysis = advanced_nlp_analysis(incoming_msg)
-    issue_type = analysis['primary_issue']
-    location = analysis['location']
-    confidence = analysis['confidence']
-    urgency_level = analysis['urgency']
-    all_issues = analysis['all_issues']
+    # Detect intent naturally
+    intent = conversation_engine.detect_intent(incoming_msg)
+    print(f"🎯 Detected intent: {intent}")
     
-    print(f"🤖 NLP Analysis: {analysis}")
-
-    # Enhanced urgency handling
-    if urgency_level == 'high':
-        urgency_note = "URGENT: This has been flagged as high priority! "
-        priority_emoji = "🚨"
-    elif urgency_level == 'medium':
-        urgency_note = "Priority: This issue has been elevated. "
-        priority_emoji = "⚠️"
+    if intent == 'greeting':
+        response_text = ai_generator.generate_ai_response('greeting')
+    
+    elif intent == 'help':
+        response_text = ai_generator.generate_ai_response('help')
+    
+    elif intent == 'thanks':
+        response_text = ai_generator.generate_ai_response('thanks')
+    
+    elif intent == 'status':
+        # Handle status checks
+        if incoming_msg.isdigit():
+            report_info = get_report_status(int(incoming_msg))
+            if report_info:
+                status, issue_type, department = report_info
+                context = {
+                    'report_id': incoming_msg,
+                    'status': status,
+                    'issue_type': issue_type,
+                    'department': department
+                }
+                response_text = ai_generator.generate_ai_response('status_update', context)
+            else:
+                response_text = f"I couldn't find a report with ID #{incoming_msg}. Could you double-check the number?"
+        else:
+            response_text = "To check a report status, just send me the report number! Like '123'"
+    
+    elif intent == 'report' or (num_media > 0 and incoming_msg):
+        # Process reports with natural language
+        analysis = nlp_engine.analyze_message(incoming_msg)
+        print(f"🧠 Analysis: {analysis}")
+        
+        # Handle image if present
+        image_url = request.values.get('MediaUrl0') if num_media > 0 else None
+        vision_analysis = analyze_image_with_vision(image_url) if image_url and 'analyze_image_with_vision' in globals() else None
+        
+        # Determine final issue type
+        final_issue_type = _resolve_issue_type(analysis, vision_analysis)
+        
+        # Geocode location
+        lat, lng = geocode_location(analysis['location'])
+        
+        # Save report
+        report_id = save_report(
+            phone=sender_phone,
+            issue_type=final_issue_type,
+            description=incoming_msg,
+            location=analysis['location'],
+            image_url=image_url,
+            lat=lat,
+            lng=lng,
+            department=analysis['department']
+        )
+        
+        # Create context for AI response
+        context = {
+            'issue': final_issue_type.replace('_', ' '),
+            'location': analysis['location'],
+            'report_id': report_id,
+            'department': analysis['department'].replace('_', ' ').title(),
+            'urgency': analysis['urgency'],
+            'confidence': analysis['confidence'],
+            'has_photo': bool(image_url)
+        }
+        
+        # Generate natural AI response
+        response_text = ai_generator.generate_ai_response('report_received', context)
+    
+    elif num_media > 0 and not incoming_msg:
+        # Photo only without text
+        response_text = "Thanks for the photo! Could you tell me what issue you're reporting and where it's located?"
+    
     else:
-        urgency_note = ""
-        priority_emoji = ""
-
-    # Enhanced response templates
-    response_templates = {
-        'pothole': f"{urgency_note}Thank you for reporting the pothole at {{location}}! ",
-        'garbage': f"{urgency_note}Thank you for reporting the garbage issue at {{location}}! ",
-        'water_issue': f"{urgency_note}Thank you for reporting the water issue at {{location}}! ",
-        'traffic': f"{urgency_note}Thank you for reporting the traffic issue at {{location}}! ",
-        'street_light': f"{urgency_note}Thank you for reporting the street light issue at {{location}}! ",
-        'graffiti': f"{urgency_note}Thank you for reporting the graffiti at {{location}}! ",
-        'other': f"{urgency_note}Thank you for your report at {{location}}! ",
-    }
-
-    # In your webhook function, replace the image processing section:
-if num_media > 0:
-    image_url = request.values.get('MediaUrl0')
-    print(f"🖼️ Processing image: {image_url}")
-    
-    # Analyze the image with Computer Vision
-    vision_analysis = analyze_image_with_vision(image_url)
-    print(f"Vision Analysis: {vision_analysis}")
-    
-    # Combine NLP and Vision analysis intelligently
-    nlp_confidence = analysis['confidence']
-    vision_confidence = vision_analysis.get('confidence', 0)
-    
-    if (vision_analysis.get('primary_issue') and 
-        vision_analysis['primary_issue'] != 'unknown' and 
-        vision_confidence > 0.6 and 
-        vision_confidence > nlp_confidence):
-        # Vision analysis is more confident, use it
-        final_issue_type = vision_analysis['primary_issue']
-        analysis_source = " (AI Image Analysis)"
-        confidence_note = f"AI Vision is {int(vision_confidence*100)}% confident"
-    else:
-        # Use NLP analysis
-        final_issue_type = analysis['primary_issue']
-        analysis_source = " (Text Analysis)"
-        confidence_note = f"AI Text is {int(nlp_confidence*100)}% confident"
-    
-    
-    lat, lng = geocode_location(location)
-    report_id = save_report(sender_phone, final_issue_type, incoming_msg, location, image_url, lat, lng)    
-    
-    # Build enhanced response
-    template = response_templates.get(final_issue_type, response_templates['other'])
-    response_text = f"{urgency_note}Image analyzed{analysis_source}!\n"
-    response_text += template.format(location=location)
-    response_text += f"\n\nReport ID: #{report_id}"
-    response_text += f"\n{confidence_note}"
-    
-    # Add vision insights if available
-    if vision_analysis.get('detected_issues'):
-        vision_issues = [issue['type'] for issue in vision_analysis['detected_issues'][:3]]
-        unique_issues = list(set(vision_issues))
-        if len(unique_issues) > 1:
-            response_text += f"\n\n🔍 AI detected: {', '.join(unique_issues)}"
-    
-    # Add follow-up for urgent issues
-    if analysis['needs_follow_up']:
-        response_text += f"\n\n{priority_emoji} This has been marked for immediate attention!"
+        # Unknown message
+        response_text = ai_generator.generate_ai_response('unknown')
     
     msg = resp.message(response_text)
-    
-    elif incoming_msg.isdigit():
-        # Status checking feature
-        report_info = get_report_status(int(incoming_msg))
-        if report_info:
-            status, issue_type = report_info
-            status_messages = {
-                'received': f"Report #{incoming_msg} ({issue_type}) is received and awaiting review",
-                'in-progress': f"Report #{incoming_msg} ({issue_type}) is currently being addressed",
-                'resolved': f"Report #{incoming_msg} ({issue_type}) has been resolved!"
-            }
-            msg = resp.message(status_messages.get(status, f"Report #{incoming_msg} status: {status}"))
-        else:
-            msg = resp.message("❌ Report ID not found. Please check your report number.")
-    
-    elif 'hello' in incoming_msg.lower() or 'hi' in incoming_msg.lower() or 'hey' in incoming_msg.lower():
-        msg = resp.message("""Hello! I'm CivicBot - your AI-powered community assistant!
-
-I can help you report:
-Potholes & Road damage
-Garbage & Sanitation issues  
-Street light problems
-Water leaks & Flooding
-Traffic & Signal issues
-Graffiti & Vandalism
-
-*Send a photo with a description* for fastest service!
-Include location like "on Main Street" or "near the park"
-
-Try: "There's a large pothole on Adebisi Street" + photo""")
-    
-    elif 'help' in incoming_msg.lower():
-        msg = resp.message("""*CivicBot Help Guide*
-
-📝*How to Report:*
-• Send a photo + description
-• Include location in your message
-• Example: "Large pothole on Main Street near park"
-
-🔍 *Check Status:*
-• Send your report number
-• Example: "123"
-
-*Urgent Issues:*
-Use words like: *urgent, emergency, dangerous, asap*
-
-📍*Location Tips:*
-• "on Oak Avenue"
-• "near city hall" 
-• "at 5th and Main Street"
-• "in Central Park"
-
-📞*Need human help?* Your report will be reviewed by our team!""")
-    
-    elif 'thank' in incoming_msg.lower():
-        msg = resp.message("""You're welcome!😊 
-
-I'm here to help make our community better. Feel free to report any issues you see!""")
-    
-    else:
-        # For text-only reports without images
-        if issue_type != 'other' or location != 'Unknown':
-            report_id = save_report(sender_phone, issue_type, incoming_msg, location)
-            
-            template = response_templates.get(issue_type, response_templates['other'])
-            response_text = template.format(location=location)
-            response_text += f"\n\n📋Report ID: #{report_id}"
-            
-            # Add photo suggestion
-            response_text += "\n\n *Tip: Next time include a photo for faster resolution!*"
-            
-            # Add confidence note
-            if confidence < 0.7:
-                response_text += f"\n I'm {int(confidence*100)}% sure about the issue type."
-            
-            msg = resp.message(response_text)
-        else:
-            # Generic response for unclear messages
-            msg = resp.message(""" I'm not sure what you'd like to report.
-
-Try sending:
-• A photo of the issue + description
-• Or be more specific like:
-  "Pothole on Main Street"
-  "Garbage overflowing on Oak Ave"
-  "Street light out at 5th Street"
-
-Type *help* for more options!""")
-
     return str(resp)
+
+def _resolve_issue_type(nlp_analysis, vision_analysis):
+    """Resolve between NLP and vision analysis"""
+    if (vision_analysis and 
+        vision_analysis.get('primary_issue') != 'unknown' and
+        vision_analysis.get('confidence', 0) > nlp_analysis['confidence']):
+        return vision_analysis['primary_issue']
+    return nlp_analysis['primary_issue']
 
 @app.route('/admin')
 def admin_dashboard():
