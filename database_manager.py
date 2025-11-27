@@ -2,7 +2,6 @@
 import sqlite3
 import csv
 import json
-import pandas as pd
 from datetime import datetime, timedelta
 import os
 import time
@@ -445,24 +444,10 @@ class DatabaseManager:
         return filename
     
     def export_to_excel(self, filters=None):
-        """Export reports to Excel format"""
-        try:
-            data = self.get_reports(filters=filters, per_page=10000)
-            
-            if not data['reports']:
-                return None
-            
-            filename = f'reports_export_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx'
-            df = pd.DataFrame(data['reports'])
-            df.to_excel(filename, index=False, engine='openpyxl')
-            
-            return filename
-        except ImportError:
-            print("⚠️ Pandas not available for Excel export")
-            return None
-        except Exception as e:
-            print(f"❌ Excel export error: {e}")
-            return None
+        """Export reports to Excel format - CSV alternative"""
+        # Since we removed pandas, provide CSV as Excel alternative
+        print("⚠️ Excel export not available without pandas. Using CSV format instead.")
+        return self.export_to_csv(filters)
     
     # Backup and Maintenance
     def backup_database(self, backup_path=None):
