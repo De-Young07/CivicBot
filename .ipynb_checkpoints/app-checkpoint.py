@@ -1,82 +1,305 @@
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 from database import init_db, save_report
+from conversation_engine import ConversationEngine
+from ai_response_generator import AIResponseGenerator
 import sqlite3
 import requests
 import json
 import os
+import re
+import base64
+import json
+from datetime import datetime
+
 
 app = Flask(__name__)
 
 init_db()
 
+conversation_engine = ConversationEngine()
+ai_generator = AIResponseGenerator()
 
-def analyze_image(image_url):
-    """Basic image analysis - you can enhance this with proper AI services"""
+
+def analyze_image_with_vision(image_url):
+    """Analyze images using Google Cloud Vision API"""
     try:
+        # Download image
         response = requests.get(image_url)
-        if response.status_code == 200:
-            file_size = len(response.content) / 1024  # Size in KB
-            if file_size > 100:  # If image is reasonably large
-                return "✅ Image quality appears good for analysis"
-            else:
-                return "⚠️ Image might be blurry or low quality"
-    except:
-        pass
-    return "Image received!"
+        if response.status_code != 200:
+            return {"error": "Could not download image"}
+        
+        # Encode image for Vision API
+        image_content = base64.b64encode(response.content).decode('utf-8')
+        
+        # Get API key from environment
+        api_key = os.environ.get('GOOGLE_VISION_API_KEY')
+        
+        if not api_key:
+            return basic_image_analysis(response.content)
+        
+        # Google Vision API request
+        vision_url = f"https://vision.googleapis.com/v1/images:annotate?key={api_key}"
+        
+        payload = {
+            "requests": [
+                {
+                    "image": {"content": image_content},
+                    "features": [
+                        {"type": "LABEL_DETECTION", "maxResults": 10},
+                        {"type": "OBJECT_LOCALIZATION", "maxResults": 10},
+                        {"type": "SAFE_SEARCH_DETECTION", "maxResults": 5}
+                    ]
+                }
+            ]
+        }
+        
+        vision_response = requests.post(vision_url, json=payload)
+        
+        if vision_response.status_code == 200:
+            return parse_vision_results(vision_response.json())
+        else:
+            print(f"Vision API error: {vision_response.status_code} - {vision_response.text}")
+            return basic_image_analysis(response.content)
+        
+    except Exception as e:
+        print(f"Vision analysis error: {e}")
+        return basic_image_analysis(response.content if 'response' in locals() else None)
 
-def analyze_message(message):
+def basic_image_analysis(image_content):
+    """Fallback image analysis when no API available"""
+    if not image_content:
+        return {"analysis_source": "basic", "detected_issues": []}
     
-    message_lower = message.lower()
+    file_size_kb = len(image_content) / 1024
     
-    # Define patterns for different issue types
-    patterns = {
-        'pothole': ['pothole', 'road damage', 'street damage', 'hole in road', 'road hole', 'asphalt damage'],
-        'garbage': ['garbage', 'trash', 'rubbish', 'waste', 'dump', 'litter', 'cleanup', 'sanitation'],
-        'street_light': ['street light', 'streetlight', 'light out', 'dark street', 'lamp post', 'light pole'],
-        'water_issue': ['water', 'flood', 'leak', 'pipe', 'drainage', 'sewage', 'overflow'],
-        'traffic': ['traffic', 'congestion', 'signal', 'stop light', 'road block', 'accident'],
-        'noise': ['noise', 'loud', 'sound', 'disturbance', 'construction noise']
+    analysis = {
+        "analysis_source": "basic",
+        "file_size_kb": round(file_size_kb, 1),
+        "quality": "good" if file_size_kb > 100 else "poor",
+        "detected_issues": [],
+        "safe_for_work": True
     }
     
-    # Location keywords
-    location_keywords = ['at ', 'on ', 'near ', 'corner of', 'between', 'street', 'avenue', 'road', 'lane']
+    return analysis
+
+def parse_vision_results(vision_data):
+    """Parse Google Vision API results for civic issues"""
+    try:
+        if 'responses' not in vision_data or not vision_data['responses']:
+            return {"analysis_source": "vision_api", "detected_issues": []}
+        
+        response = vision_data['responses'][0]
+        labels = response.get('labelAnnotations', [])
+        objects = response.get('localizedObjectAnnotations', [])
+        safe_search = response.get('safeSearchAnnotation', {})
+        
+        detected_issues = []
+        confidence_threshold = 0.7
+        
+        # Enhanced issue mapping with multiple keywords
+        issue_mapping = {
+            'pothole': ['pothole', 'road', 'asphalt', 'pavement', 'damage', 'crack'],
+            'garbage': ['garbage', 'trash', 'litter', 'waste', 'rubbish', 'dumpster', 'bin'],
+            'graffiti': ['graffiti', 'vandalism', 'spray paint', 'tagging', 'wall writing'],
+            'water_issue': ['water', 'flood', 'leak', 'flooding', 'pool', 'puddle'],
+            'vehicle': ['car', 'vehicle', 'automobile', 'accident', 'traffic'],
+            'street_light': ['street light', 'lamp', 'light pole', 'streetlight', 'lamp post'],
+            'infrastructure': ['building', 'structure', 'construction', 'scaffolding']
+        }
+        
+        # Analyze labels
+        for label in labels:
+            label_text = label['description'].lower()
+            confidence = label['score']
+            
+            for issue_type, keywords in issue_mapping.items():
+                if any(keyword in label_text for keyword in keywords) and confidence > confidence_threshold:
+                    detected_issues.append({
+                        'type': issue_type,
+                        'confidence': confidence,
+                        'source': f"label: {label_text}",
+                        'score': confidence
+                    })
+        
+        # Analyze objects
+        for obj in objects:
+            object_name = obj['name'].lower()
+            confidence = obj['score']
+            
+            for issue_type, keywords in issue_mapping.items():
+                if any(keyword in object_name for keyword in keywords) and confidence > confidence_threshold:
+                    detected_issues.append({
+                        'type': issue_type,
+                        'confidence': confidence,
+                        'source': f"object: {object_name}",
+                        'score': confidence
+                    })
+        
+        # Remove duplicates and sort by confidence
+        unique_issues = {}
+        for issue in detected_issues:
+            if issue['type'] not in unique_issues or issue['score'] > unique_issues[issue['type']]['score']:
+                unique_issues[issue['type']] = issue
+        
+        detected_issues = list(unique_issues.values())
+        detected_issues.sort(key=lambda x: x['score'], reverse=True)
+        
+        return {
+            "analysis_source": "google_vision_api",
+            "detected_issues": detected_issues,
+            "primary_issue": detected_issues[0]['type'] if detected_issues else 'unknown',
+            "safe_for_work": safe_search.get('adult', 'UNKNOWN') in ['VERY_UNLIKELY', 'UNLIKELY'],
+            "confidence": detected_issues[0]['score'] if detected_issues else 0
+        }
+        
+    except Exception as e:
+        print(f"Error parsing vision results: {e}")
+        return {"analysis_source": "vision_api", "detected_issues": [], "error": str(e)}
+
+
+
+def advanced_nlp_analysis(message):
+    """Advanced NLP with entity recognition and sentiment analysis"""
     
-    # Issue type
-    detected_issue = 'other'
-    confidence = 0
+    message_lower = message.lower().strip()
     
-    for issue_type, keywords in patterns.items():
-        for keyword in keywords:
+    # Enhanced pattern matching with confidence scores
+    patterns = {
+        'pothole': {
+            'keywords': ['pothole', 'road damage', 'street damage', 'hole in road', 'road hole', 'asphalt damage', 'cracked road', 'road crack'],
+            'weight': 1.0,
+            'emergency': False
+        },
+        'garbage': {
+            'keywords': ['garbage', 'trash', 'rubbish', 'waste', 'dump', 'litter', 'cleanup', 'sanitation', 'overflowing bin', 'dumpster'],
+            'weight': 0.9,
+            'emergency': False
+        },
+        'street_light': {
+            'keywords': ['street light', 'streetlight', 'light out', 'dark street', 'lamp post', 'light pole', 'broken light', 'flickering light'],
+            'weight': 0.8,
+            'emergency': False
+        },
+        'water_issue': {
+            'keywords': ['water leak', 'flood', 'leak', 'pipe burst', 'drainage', 'sewage', 'overflow', 'water main', 'flooding'],
+            'weight': 1.0,
+            'emergency': True
+        },
+        'traffic': {
+            'keywords': ['traffic light', 'stop light', 'signal broken', 'road block', 'accident', 'car crash', 'congestion'],
+            'weight': 1.0,
+            'emergency': True
+        },
+        'graffiti': {
+            'keywords': ['graffiti', 'vandalism', 'spray paint', 'tagging', 'defaced'],
+            'weight': 0.7,
+            'emergency': False
+        }
+    }
+    
+    # Location extraction with multiple patterns
+    location_patterns = [
+        r'(?:at|on|near|around|beside|opposite)\s+([^,.!?]+)',
+        r'(\d+\s+\w+\s+(?:street|st|avenue|ave|road|rd|boulevard|blvd|lane|ln))',
+        r'(?:location|address)[:\s]+([^,.!?]+)',
+        r'in\s+([^,.!?]+?(?:area|neighborhood|district))'
+    ]
+    
+    # Urgency detection
+    urgency_indicators = ['urgent', 'emergency', 'asap', 'immediately', 'critical', 'dangerous', 'hazard']
+    
+    # Analyze the message
+    detected_issues = []
+    location = 'Unknown'
+    urgency_level = 'normal'
+    
+    # Find issues with confidence scores
+    for issue_type, data in patterns.items():
+        for keyword in data['keywords']:
             if keyword in message_lower:
-                detected_issue = issue_type
-                confidence += 1
+                confidence = data['weight']
+                # Boost confidence if multiple keywords match
+                if sum(1 for k in data['keywords'] if k in message_lower) > 1:
+                    confidence += 0.2
+                
+                detected_issues.append({
+                    'type': issue_type,
+                    'confidence': min(confidence, 1.0),
+                    'emergency': data['emergency']
+                })
                 break
     
-    # Location extraction
-    location = 'Unknown'
-    for loc_keyword in location_keywords:
-        if loc_keyword in message_lower:
-            # Extract text after location keyword
-            start_idx = message_lower.find(loc_keyword) + len(loc_keyword)
-            location = message_lower[start_idx:].split('.')[0].split(',')[0].strip()
-            if len(location) > 30:  # If too long, truncate
-                location = location[:30] + "..."
-            break
+    # Extract location
+    for pattern in location_patterns:
+        matches = re.findall(pattern, message_lower, re.IGNORECASE)
+        if matches:
+            location = matches[0].strip()
+            if len(location) > 5:  # Reasonable location length
+                break
     
-    if detected_issue == 'other' and location != 'Unknown':
-        detected_issue = 'general_issue'
+    # Detect urgency
+    if any(indicator in message_lower for indicator in urgency_indicators):
+        urgency_level = 'high'
+    elif any(issue['emergency'] for issue in detected_issues):
+        urgency_level = 'medium'
+    
+    # Sort by confidence and get top issue
+    if detected_issues:
+        detected_issues.sort(key=lambda x: x['confidence'], reverse=True)
+        primary_issue = detected_issues[0]
+    else:
+        primary_issue = {'type': 'other', 'confidence': 0.0, 'emergency': False}
     
     return {
-        'category': detected_issue,
+        'primary_issue': primary_issue['type'],
+        'confidence': primary_issue['confidence'],
+        'all_issues': [issue['type'] for issue in detected_issues],
         'location': location.title() if location != 'Unknown' else 'Unknown',
-        'confidence': confidence
+        'urgency': urgency_level,
+        'needs_follow_up': primary_issue['emergency'] or urgency_level in ['high', 'medium']
     }
 
+def geocode_location(location_text):
+    """Convert location text to latitude/longitude using OpenStreetMap Nominatim"""
+    try:
+        if location_text.lower() in ['unknown', '', 'none']:
+            return None, None
+            
+        # Use OpenStreetMap Nominatim API (free)
+        base_url = "https://nominatim.openstreetmap.org/search"
+        params = {
+            'q': f"{location_text}",
+            'format': 'json',
+            'limit': 1
+        }
+        
+        headers = {
+            'User-Agent': 'CivicBot/1.0 (Community Service Reporting System)'
+        }
+        
+        response = requests.get(base_url, params=params, headers=headers)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data:
+                lat = float(data[0]['lat'])
+                lon = float(data[0]['lon'])
+                print(f"📍 Geocoded '{location_text}' to {lat}, {lon}")
+                return lat, lon
+        
+        print(f"❌ Could not geocode: {location_text}")
+        return None, None
+        
+    except Exception as e:
+        print(f"Geocoding error: {e}")
+        return None, None
+
 def get_report_status(report_id):
+    """Get report status with department info"""
     conn = sqlite3.connect('civicbot.db')
     c = conn.cursor()
-    c.execute("SELECT status, issue_type FROM reports WHERE id = ?", (report_id,))
+    c.execute("SELECT status, issue_type, department FROM reports WHERE id = ?", (report_id,))
     result = c.fetchone()
     conn.close()
     return result
@@ -380,87 +603,104 @@ def home():
     
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    incoming_msg = request.values.get('Body', '')
-    phone_number = request.values.get('From', '')
-    media = int(request.values.get('NumMedia', 0))
+    incoming_msg = request.values.get('Body', '').strip()
+    sender_phone = request.values.get('From', '')
+    num_media = int(request.values.get('NumMedia', 0))
 
-    print(f"Received message from {phone_number}: {incoming_msg}")
+    print(f"💬 Message from {sender_phone}: {incoming_msg}")
     
     resp = MessagingResponse()
     
-    # Use our free local AI analysis
-    analysis = analyze_message(incoming_msg)
-    issue_type = analysis['category']
-    location = analysis['location']
+    # Detect intent naturally
+    intent = conversation_engine.detect_intent(incoming_msg)
+    print(f"🎯 Detected intent: {intent}")
     
-    print(f"Analysis: {analysis}")
-
-    if media > 0:
-        image_url = request.values.get('MediaUrl0')
-        report_id = save_report(phone_number, issue_type, incoming_msg, location, image_url)
+    if intent == 'greeting':
+        response_text = ai_generator.generate_ai_response('greeting')
+    
+    elif intent == 'help':
+        response_text = ai_generator.generate_ai_response('help')
+    
+    elif intent == 'thanks':
+        response_text = ai_generator.generate_ai_response('thanks')
+    
+    elif intent == 'status':
+        # Handle status checks
+        if incoming_msg.isdigit():
+            report_info = get_report_status(int(incoming_msg))
+            if report_info:
+                status, issue_type, department = report_info
+                context = {
+                    'report_id': incoming_msg,
+                    'status': status,
+                    'issue_type': issue_type,
+                    'department': department
+                }
+                response_text = ai_generator.generate_ai_response('status_update', context)
+            else:
+                response_text = f"I couldn't find a report with ID #{incoming_msg}. Could you double-check the number?"
+        else:
+            response_text = "To check a report status, just send me the report number! Like '123'"
+    
+    elif intent == 'report' or (num_media > 0 and incoming_msg):
+        # Process reports with natural language
+        analysis = nlp_engine.analyze_message(incoming_msg)
+        print(f"🧠 Analysis: {analysis}")
         
-        issue_responses = {
-            'pothole': f"🕳️ Thank you for reporting the pothole at {location}! Report ID: #{report_id}",
-            'garbage': f"🗑️ Thank you for reporting the garbage issue at {location}! Report ID: #{report_id}",
-            'street_light': f"💡 Thank you for reporting the street light issue at {location}! Report ID: #{report_id}",
-            'water_issue': f"💧 Thank you for reporting the water issue at {location}! Report ID: #{report_id}",
-            'traffic': f"🚦 Thank you for reporting the traffic issue at {location}! Report ID: #{report_id}",
-            'noise': f"🔊 Thank you for reporting the noise issue at {location}! Report ID: #{report_id}",
-            'general_issue': f"📋 Thank you for reporting the issue at {location}! Report ID: #{report_id}",
-            'other': f"📋 Thank you for your report! We've logged it with ID: #{report_id}"
+        # Handle image if present
+        image_url = request.values.get('MediaUrl0') if num_media > 0 else None
+        vision_analysis = analyze_image_with_vision(image_url) if image_url and 'analyze_image_with_vision' in globals() else None
+        
+        # Determine final issue type
+        final_issue_type = _resolve_issue_type(analysis, vision_analysis)
+        
+        # Geocode location
+        lat, lng = geocode_location(analysis['location'])
+        
+        # Save report
+        report_id = save_report(
+            phone=sender_phone,
+            issue_type=final_issue_type,
+            description=incoming_msg,
+            location=analysis['location'],
+            image_url=image_url,
+            lat=lat,
+            lng=lng,
+            department=analysis['department']
+        )
+        
+        # Create context for AI response
+        context = {
+            'issue': final_issue_type.replace('_', ' '),
+            'location': analysis['location'],
+            'report_id': report_id,
+            'department': analysis['department'].replace('_', ' ').title(),
+            'urgency': analysis['urgency'],
+            'confidence': analysis['confidence'],
+            'has_photo': bool(image_url)
         }
         
-        response_text = issue_responses.get(issue_type, issue_responses['other'])
-        if analysis['confidence'] == 0 and location == 'Unknown':
-            response_text += "\n\n💡 Tip: For faster service, include the location in your message!"
-            
-        msg = resp.message(response_text)
+        # Generate natural AI response
+        response_text = ai_generator.generate_ai_response('report_received', context)
     
-    elif incoming_msg.isdigit():
-        # Status checking feature
-        report_info = get_report_status(int(incoming_msg))
-        if report_info:
-            status, issue_type = report_info
-            status_messages = {
-                'received': f"📋 Report #{incoming_msg} ({issue_type}) is received and awaiting review",
-                'in-progress': f"🔄 Report #{incoming_msg} ({issue_type}) is currently being addressed",
-                'resolved': f"✅ Report #{incoming_msg} ({issue_type}) has been resolved!"
-            }
-            msg = resp.message(status_messages.get(status, f"Report #{incoming_msg} status: {status}"))
-        else:
-            msg = resp.message("❌ Report ID not found. Please check your report number.")
-    
-    elif 'hello' in incoming_msg.lower() or 'hi' in incoming_msg.lower():
-        msg = resp.message("""Hello! I'm CivicBot 🤖
-
-I can help you report:
-🕳️ Potholes & Road damage
-🗑️ Garbage & Sanitation issues  
-💡 Street light problems
-💧 Water leaks & Flooding
-🚦 Traffic & Signal issues
-🔊 Noise disturbances
-
-Just send a photo with a description and location!""")
-    
-    elif 'help' in incoming_msg.lower():
-        msg = resp.message("""🆘 **CivicBot Help**
-
-📸 **To report an issue:** Send a photo with a description
-Example: "Large pothole on Main Street near the park"
-
-🔍 **Check status:** Send your report number
-Example: "123"
-
-📍 **Include location** for faster service!
-Example: "on Oak Avenue", "near city hall", "at 5th and Main"
-
-We support: potholes, garbage, street lights, water issues, traffic, noise, and more!""")
+    elif num_media > 0 and not incoming_msg:
+        # Photo only without text
+        response_text = "Thanks for the photo! Could you tell me what issue you're reporting and where it's located?"
     
     else:
-        msg = resp.message("I can help you report civic issues! 📸 Send a photo of the problem with a description and location. Type 'help' for more options.")
-
+        # Unknown message
+        response_text = ai_generator.generate_ai_response('unknown')
+    
+    msg = resp.message(response_text)
     return str(resp)
+
+def _resolve_issue_type(nlp_analysis, vision_analysis):
+    """Resolve between NLP and vision analysis"""
+    if (vision_analysis and 
+        vision_analysis.get('primary_issue') != 'unknown' and
+        vision_analysis.get('confidence', 0) > nlp_analysis['confidence']):
+        return vision_analysis['primary_issue']
+    return nlp_analysis['primary_issue']
 
 @app.route('/admin')
 def admin_dashboard():
@@ -534,21 +774,21 @@ def admin_dashboard():
             
             html += f"""
             <div class="report {status_class}">
-                <h3>📋 Report #{report_id} - {issue_type.title()}</h3>
-                <p><strong>📞 From:</strong> {phone}</p>
-                <p><strong>📝 Description:</strong> {description}</p>
-                <p><strong>📍 Location:</strong> {location}</p>
+                <h3>Report #{report_id} - {issue_type.title()}</h3>
+                <p><strong>From:</strong> {phone}</p>
+                <p><strong>Description:</strong> {description}</p>
+                <p><strong>Location:</strong> {location}</p>
                 {image_html}
-                <p><strong>🔄 Status:</strong> {status.upper()}</p>
-                <p><strong>📅 Submitted:</strong> {created_at}</p>
+                <p><strong>Status:</strong> {status.upper()}</p>
+                <p><strong>Submitted:</strong> {created_at}</p>
                 
                 <form action="/update_status" method="post" style="margin-top: 15px;">
                     <input type="hidden" name="report_id" value="{report_id}">
                     <label><strong>Update Status:</strong></label>
                     <select name="status">
-                        <option value="received" {'selected' if status=='received' else ''}>📥 Received</option>
-                        <option value="in-progress" {'selected' if status=='in-progress' else ''}>🔄 In Progress</option>
-                        <option value="resolved" {'selected' if status=='resolved' else ''}>✅ Resolved</option>
+                        <option value="received" {'selected' if status=='received' else ''}>Received</option>
+                        <option value="in-progress" {'selected' if status=='in-progress' else ''}>In Progress</option>
+                        <option value="resolved" {'selected' if status=='resolved' else ''}>Resolved</option>
                     </select>
                     <button type="submit" class="btn">Update</button>
                 </form>
@@ -562,6 +802,7 @@ def admin_dashboard():
     """
     return html
 
+
 @app.route('/admin/stats')
 def admin_stats():
     conn = sqlite3.connect('civicbot.db')
@@ -569,7 +810,7 @@ def admin_stats():
     
     # Get various statistics
     c.execute("SELECT COUNT(*) FROM reports")
-    total_reports = c.fetchone()[0]
+    total_reports = c.fetchone()[0] or 0  # Ensure it's never None
     
     c.execute("SELECT status, COUNT(*) FROM reports GROUP BY status")
     status_stats = dict(c.fetchall())
@@ -577,10 +818,16 @@ def admin_stats():
     c.execute("SELECT issue_type, COUNT(*) FROM reports GROUP BY issue_type")
     issue_stats = dict(c.fetchall())
     
-    c.execute("SELECT COUNT(*) FROM reports WHERE image_url IS NOT NULL")
-    reports_with_images = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM reports WHERE image_url IS NOT NULL AND image_url != ''")
+    reports_with_images = c.fetchone()[0] or 0
     
     conn.close()
+    
+    # Safe percentage calculations
+    if total_reports > 0:
+        image_percentage = (reports_with_images / total_reports) * 100
+    else:
+        image_percentage = 0
     
     # FIXED: Proper string formatting for CSS
     html = f"""
@@ -615,6 +862,13 @@ def admin_stats():
                 border-radius: 4px;
                 margin-right: 10px;
             }}
+            .empty-state {{
+                background: white;
+                padding: 40px;
+                text-align: center;
+                border-radius: 10px;
+                margin: 20px 0;
+            }}
         </style>
     </head>
     <body>
@@ -622,10 +876,22 @@ def admin_stats():
             <h1>📊 CivicBot Analytics</h1>
             <div class="nav">
                 <a href="/admin">📋 View All Reports</a>
+                <a href="/map">🗺️ View Map</a>
                 <a href="/">🏠 Home</a>
             </div>
         </div>
-        
+    """
+    
+    if total_reports == 0:
+        html += """
+        <div class="empty-state">
+            <h2>📊 No Reports Yet</h2>
+            <p>When users start sending reports via WhatsApp, statistics will appear here.</p>
+            <p>Try sending a message to your bot to create the first report!</p>
+        </div>
+        """
+    else:
+        html += f"""
         <div class="stat">
             <h3>📈 Total Reports</h3>
             <p style="font-size: 24px; font-weight: bold; color: #007bff;">{total_reports}</p>
@@ -633,41 +899,383 @@ def admin_stats():
         
         <div class="stat">
             <h3>📸 Reports with Photos</h3>
-            <p style="font-size: 20px; color: #28a745;">{reports_with_images} ({reports_with_images/total_reports*100:.1f}% of total)</p>
+            <p style="font-size: 20px; color: #28a745;">{reports_with_images} ({image_percentage:.1f}% of total)</p>
         </div>
         
         <div class="stat">
             <h3>📊 Status Distribution</h3>
             <ul>
-    """
-    
-    # Add status statistics
-    for status, count in status_stats.items():
-        percentage = (count / total_reports) * 100 if total_reports > 0 else 0
-        html += f'<li><strong>{status.title()}:</strong> {count} reports ({percentage:.1f}%)</li>'
-    
-    html += """
+        """
+        
+        # Add status statistics
+        for status, count in status_stats.items():
+            percentage = (count / total_reports) * 100
+            html += f'<li><strong>{status.title()}:</strong> {count} reports ({percentage:.1f}%)</li>'
+        
+        html += """
             </ul>
         </div>
         
         <div class="stat">
             <h3>🔧 Issue Types</h3>
             <ul>
-    """
-    
-    # Add issue type statistics
-    for issue_type, count in issue_stats.items():
-        percentage = (count / total_reports) * 100 if total_reports > 0 else 0
-        html += f'<li><strong>{issue_type.title()}:</strong> {count} reports ({percentage:.1f}%)</li>'
-    
-    html += """
+        """
+        
+        # Add issue type statistics
+        for issue_type, count in issue_stats.items():
+            percentage = (count / total_reports) * 100
+            html += f'<li><strong>{issue_type.title()}:</strong> {count} reports ({percentage:.1f}%)</li>'
+        
+        html += """
             </ul>
         </div>
+        """
+    
+    html += """
     </body>
     </html>
     """
     
     return html
+
+# Add to your app.py
+import json
+from geocoding_service import geocoder
+
+@app.route('/map')
+def interactive_map():
+    """Main interactive map showing all reports"""
+    return '''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>CivicBot - Live Issue Map</title>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+        <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+        <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
+        <style>
+            body { 
+                margin: 0; 
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                background: #f8f9fa;
+            }
+            #map { 
+                height: 100vh; 
+                width: 100%;
+            }
+            .header {
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                padding: 20px;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            }
+            .controls {
+                background: white;
+                padding: 15px 20px;
+                border-bottom: 1px solid #e9ecef;
+                display: flex;
+                align-items: center;
+                gap: 15px;
+                flex-wrap: wrap;
+            }
+            .stats-bar {
+                background: #343a40;
+                color: white;
+                padding: 10px 20px;
+                display: flex;
+                gap: 20px;
+                font-size: 14px;
+            }
+            .filter-btn {
+                background: #6c757d;
+                color: white;
+                border: none;
+                padding: 8px 15px;
+                border-radius: 20px;
+                cursor: pointer;
+                font-size: 14px;
+                transition: all 0.3s ease;
+            }
+            .filter-btn.active {
+                background: #007bff;
+            }
+            .filter-btn:hover {
+                background: #0056b3;
+            }
+            .nav-btn {
+                background: #28a745;
+                color: white;
+                text-decoration: none;
+                padding: 8px 15px;
+                border-radius: 5px;
+                font-size: 14px;
+            }
+            .legend {
+                background: white;
+                padding: 15px;
+                border-radius: 10px;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+                position: absolute;
+                bottom: 20px;
+                right: 20px;
+                z-index: 1000;
+                max-width: 250px;
+            }
+            .legend-item {
+                display: flex;
+                align-items: center;
+                margin: 5px 0;
+                font-size: 12px;
+            }
+            .legend-color {
+                width: 20px;
+                height: 20px;
+                border-radius: 50%;
+                margin-right: 8px;
+                border: 2px solid white;
+                box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+            }
+            .cluster-marker {
+                background: #dc3545;
+                color: white;
+                border-radius: 50%;
+                text-align: center;
+                font-weight: bold;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+            }
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1 style="margin: 0; font-size: 24px;">🗺️ CivicBot Live Issue Map</h1>
+            <p style="margin: 5px 0 0 0; opacity: 0.9;">Real-time visualization of community reports</p>
+        </div>
+
+        <div class="stats-bar">
+            <div>📍 <strong id="total-reports">0</strong> Reports</div>
+            <div>🕐 Last Updated: <span id="last-updated">Just now</span></div>
+            <div>👁️ <span id="visible-reports">0</span> Visible</div>
+        </div>
+
+        <div class="controls">
+            <strong>Filter by Issue:</strong>
+            <button class="filter-btn active" data-issue="all">All Issues</button>
+            <button class="filter-btn" data-issue="pothole">🕳️ Potholes</button>
+            <button class="filter-btn" data-issue="garbage">🗑️ Garbage</button>
+            <button class="filter-btn" data-issue="street_light">💡 Street Lights</button>
+            <button class="filter-btn" data-issue="water_issue">💧 Water Issues</button>
+            <button class="filter-btn" data-issue="graffiti">🎨 Graffiti</button>
+            
+            <div style="margin-left: auto; display: flex; gap: 10px;">
+                <a href="/admin" class="nav-btn">📋 List View</a>
+                <a href="/admin/stats" class="nav-btn">📊 Statistics</a>
+                <a href="/" class="nav-btn">🏠 Home</a>
+            </div>
+        </div>
+
+        <div id="map"></div>
+
+        <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+        <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+        
+        <script>
+            // Initialize map
+            var map = L.map('map').setView([40.7128, -74.0060], 13);
+            
+            // Add tile layer
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '© OpenStreetMap contributors',
+                maxZoom: 19
+            }).addTo(map);
+            
+            // Create marker cluster group
+            var markers = L.markerClusterGroup({
+                chunkedLoading: true,
+                maxClusterRadius: 50
+            });
+            
+            // Issue type styling
+            var issueStyles = {
+                'pothole': { emoji: '🕳️', color: '#e74c3c', name: 'Pothole' },
+                'garbage': { emoji: '🗑️', color: '#f39c12', name: 'Garbage' },
+                'street_light': { emoji: '💡', color: '#f1c40f', name: 'Street Light' },
+                'water_issue': { emoji: '💧', color: '#3498db', name: 'Water Issue' },
+                'graffiti': { emoji: '🎨', color: '#9b59b6', name: 'Graffiti' },
+                'noise': { emoji: '📢', color: '#e67e22', name: 'Noise' },
+                'traffic': { emoji: '🚦', color: '#d35400', name: 'Traffic' },
+                'other': { emoji: '📋', color: '#95a5a6', name: 'Other' }
+            };
+            
+            var statusColors = {
+                'received': '#f39c12',    // Orange
+                'in-progress': '#3498db', // Blue
+                'resolved': '#27ae60'     // Green
+            };
+            
+            var currentMarkers = [];
+            var allReports = [];
+            
+            // Load reports data
+            function loadReports() {
+                fetch('/api/reports/geojson')
+                    .then(response => response.json())
+                    .then(data => {
+                        allReports = data.features;
+                        updateMap(allReports);
+                        updateStats();
+                    })
+                    .catch(error => {
+                        console.error('Error loading reports:', error);
+                    });
+            }
+            
+            // Update map with reports
+            function updateMap(reports) {
+                // Clear existing markers
+                markers.clearLayers();
+                currentMarkers = [];
+                
+                reports.forEach(function(feature) {
+                    var properties = feature.properties;
+                    var style = issueStyles[properties.issue_type] || issueStyles['other'];
+                    var statusColor = statusColors[properties.status] || '#95a5a6';
+                    
+                    // Create custom icon
+                    var icon = L.divIcon({
+                        html: `
+                            <div style="
+                                background: ${statusColor};
+                                color: white;
+                                border: 3px solid ${style.color};
+                                border-radius: 50%;
+                                width: 45px;
+                                height: 45px;
+                                display: flex;
+                                align-items: center;
+                                justify-content: center;
+                                font-size: 20px;
+                                box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+                                cursor: pointer;
+                            ">${style.emoji}</div>
+                        `,
+                        className: 'custom-marker',
+                        iconSize: [45, 45],
+                        iconAnchor: [22, 22]
+                    });
+                    
+                    var marker = L.marker([
+                        feature.geometry.coordinates[1],
+                        feature.geometry.coordinates[0]
+                    ], { icon: icon });
+                    
+                    // Create detailed popup
+                    var popupContent = `
+                        <div style="min-width: 280px; font-family: Arial, sans-serif;">
+                            <div style="background: ${style.color}; color: white; padding: 15px; margin: -16px -16px 15px -16px; border-radius: 5px 5px 0 0;">
+                                <h3 style="margin: 0; font-size: 18px;">${style.emoji} ${style.name}</h3>
+                                <p style="margin: 5px 0 0 0; opacity: 0.9;">Report #${properties.id}</p>
+                            </div>
+                            
+                            <div style="margin-bottom: 15px;">
+                                <p><strong>📍 Location:</strong><br>${properties.location}</p>
+                                <p><strong>📝 Description:</strong><br>${properties.description || 'No description provided'}</p>
+                            </div>
+                            
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px;">
+                                <div style="background: #f8f9fa; padding: 8px; border-radius: 5px;">
+                                    <strong>Status</strong><br>
+                                    <span style="color: ${statusColor}; font-weight: bold;">${properties.status.toUpperCase()}</span>
+                                </div>
+                                <div style="background: #f8f9fa; padding: 8px; border-radius: 5px;">
+                                    <strong>Department</strong><br>
+                                    ${properties.department ? properties.department.replace('_', ' ').toUpperCase() : 'N/A'}
+                                </div>
+                            </div>
+                            
+                            <div style="font-size: 12px; color: #6c757d; margin-bottom: 15px;">
+                                Reported: ${new Date(properties.created_at).toLocaleString()}
+                                ${properties.has_image ? '<br>📸 Includes photo evidence' : ''}
+                            </div>
+                            
+                            <div style="display: flex; gap: 10px;">
+                                <a href="/admin" target="_blank" 
+                                   style="flex: 1; background: #007bff; color: white; padding: 8px 12px; text-decoration: none; border-radius: 4px; text-align: center; font-size: 14px;">
+                                    View Details
+                                </a>
+                                <button onclick="updateStatus(${properties.id})" 
+                                        style="flex: 1; background: #28a745; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer; font-size: 14px;">
+                                    Update Status
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                    
+                    marker.bindPopup(popupContent);
+                    markers.addLayer(marker);
+                    currentMarkers.push(marker);
+                });
+                
+                map.addLayer(markers);
+                
+                // Auto-fit map if we have markers
+                if (reports.length > 0) {
+                    var group = new L.featureGroup(currentMarkers);
+                    map.fitBounds(group.getBounds().pad(0.1));
+                }
+                
+                updateVisibleCount();
+            }
+            
+            // Filter reports by issue type
+            function filterReports(issueType) {
+                if (issueType === 'all') {
+                    updateMap(allReports);
+                } else {
+                    var filtered = allReports.filter(function(feature) {
+                        return feature.properties.issue_type === issueType;
+                    });
+                    updateMap(filtered);
+                }
+                
+                // Update active filter button
+                document.querySelectorAll('.filter-btn').forEach(btn => {
+                    btn.classList.remove('active');
+                });
+                event.target.classList.add('active');
+            }
+            
+            // Update statistics
+            function updateStats() {
+                document.getElementById('total-reports').textContent = allReports.length;
+                document.getElementById('last-updated').textContent = new Date().toLocaleTimeString();
+            }
+            
+            function updateVisibleCount() {
+                document.getElementById('visible-reports').textContent = currentMarkers.length;
+            }
+            
+            // Auto-refresh every 30 seconds
+            setInterval(loadReports, 30000);
+            
+            // Initialize
+            loadReports();
+            
+            // Add event listeners for filter buttons
+            document.querySelectorAll('.filter-btn').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    filterReports(this.getAttribute('data-issue'));
+                });
+            });
+        </script>
+    </body>
+    </html>
+    '''
+    
 
 @app.route('/debug-routes')
 def debug_routes():
@@ -687,7 +1295,7 @@ def debug_routes():
 
 @app.route('/update_status', methods=['POST'])
 def update_status():
-    print(f"📨 Received form data: {dict(request.form)}")  # Debug line
+    print(f"Received form data: {dict(request.form)}")  # Debug line
     
     report_id = request.form.get('report_id')
     new_status = request.form.get('status')
@@ -703,11 +1311,11 @@ def update_status():
     conn.commit()
     conn.close()
     
-    print(f"✅ Successfully updated report #{report_id}")
+    print(f"✅Successfully updated report #{report_id}")
     
     return f'''
     <script>
-        alert("✅ Status updated for report #{report_id}");
+        alert("✅Status updated for report #{report_id}");
         window.location.href = "/admin";
     </script>
     '''
@@ -717,4 +1325,33 @@ if __name__ == '__main__':
     app.run(host='0.0.0.0', port=port)
 
 
+# API endpoints for map data
+@app.route('/api/reports/geojson')
+def api_reports_geojson():
+    """API endpoint to get reports in GeoJSON format"""
+    from database import get_reports_geojson
+    return jsonify(get_reports_geojson())
 
+@app.route('/api/reports/stats')
+def api_reports_stats():
+    """API endpoint for report statistics"""
+    conn = sqlite3.connect('civicbot.db')
+    c = conn.cursor()
+    
+    c.execute("SELECT COUNT(*) FROM reports")
+    total_reports = c.fetchone()[0]
+    
+    c.execute("SELECT COUNT(*) FROM reports WHERE latitude IS NOT NULL AND longitude IS NOT NULL")
+    mapped_reports = c.fetchone()[0]
+    
+    c.execute("SELECT issue_type, COUNT(*) FROM reports GROUP BY issue_type")
+    issue_stats = dict(c.fetchall())
+    
+    conn.close()
+    
+    return jsonify({
+        'total_reports': total_reports,
+        'mapped_reports': mapped_reports,
+        'issue_stats': issue_stats,
+        'last_updated': datetime.now().isoformat()
+    })

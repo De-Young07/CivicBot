@@ -3,8 +3,12 @@ from twilio.twiml.messaging_response import MessagingResponse
 from database import init_db, save_report
 from conversation_engine import ConversationEngine
 from ai_response_generator import AIResponseGenerator
+from database_manager import db_manager
 import sqlite3
 import requests
+from geocoding_service import geocoder
+from database_migrator import migrator
+from flask import render_template_string, send_file, jsonify
 import json
 import os
 import re
@@ -17,9 +21,27 @@ app = Flask(__name__)
 
 init_db()
 
-conversation_engine = ConversationEngine()
-ai_generator = AIResponseGenerator()
+print("🔄 Checking database migrations...")
+try:
+    migrator.migrate_database()
+    print("✅ Database migrations completed successfully!")
+except Exception as e:
+    print(f"❌ Database migration failed: {e}")
+    # Don't crash the app, but warn the user
+    print("⚠️ Continuing with limited functionality...")
 
+# Now initialize other components
+try:
+    nlp_engine = IntelligentCivicNLP()
+    conversation_engine = ConversationEngine()
+    ai_generator = AIResponseGenerator()
+    print("✅ All components initialized successfully!")
+except Exception as e:
+    print(f"❌ Component initialization failed: {e}")
+    # Set to None to avoid further errors
+    nlp_engine = None
+    conversation_engine = None
+    ai_generator = None
 
 def analyze_image_with_vision(image_url):
     """Analyze images using Google Cloud Vision API"""
@@ -307,197 +329,160 @@ def get_report_status(report_id):
 
 @app.route('/')
 def home():
-    conn = sqlite3.connect('civicbot.db')
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM reports")
-    total_reports = c.fetchone()[0]
-    
-    c.execute("SELECT COUNT(*) FROM reports WHERE status='resolved'")
-    resolved_reports = c.fetchone()[0]
-    
-    c.execute("SELECT COUNT(DISTINCT phone) FROM reports")
-    unique_users = c.fetchone()[0]
-    conn.close()
-    
-    return f"""
+    stats = db_manager.get_dashboard_stats()
+    return f'''
     <!DOCTYPE html>
-    <html lang="en">
+    <html>
     <head>
-        <meta charset="UTF-8">
+        <title>CivicBot - Community Reporting</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>CivicBot - Community Problem Reporting</title>
         <style>
             * {{
                 margin: 0;
                 padding: 0;
                 box-sizing: border-box;
             }}
-            
             body {{
                 font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
                 background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                 color: #333;
-                line-height: 1.6;
+                min-height: 100vh;
             }}
-            
             .container {{
                 max-width: 1200px;
                 margin: 0 auto;
-                padding: 20px;
+                padding: 40px 20px;
             }}
-            
             .hero {{
-                background: white;
+                background: rgba(255, 255, 255, 0.95);
                 border-radius: 20px;
                 padding: 60px 40px;
                 text-align: center;
                 margin-bottom: 40px;
                 box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+                backdrop-filter: blur(10px);
             }}
-            
             .hero h1 {{
                 font-size: 3.5em;
                 margin-bottom: 20px;
                 background: linear-gradient(135deg, #667eea, #764ba2);
                 -webkit-background-clip: text;
                 -webkit-text-fill-color: transparent;
+                font-weight: 800;
             }}
-            
             .hero p {{
                 font-size: 1.3em;
                 color: #666;
                 margin-bottom: 30px;
+                line-height: 1.6;
             }}
-            
             .stats {{
                 display: grid;
                 grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-                gap: 20px;
-                margin: 40px 0;
+                gap: 25px;
+                margin: 50px 0;
             }}
-            
             .stat-card {{
-                background: white;
+                background: rgba(255, 255, 255, 0.95);
                 padding: 30px;
                 border-radius: 15px;
                 text-align: center;
                 box-shadow: 0 10px 30px rgba(0,0,0,0.1);
                 transition: transform 0.3s ease;
+                backdrop-filter: blur(10px);
             }}
-            
             .stat-card:hover {{
                 transform: translateY(-5px);
             }}
-            
             .stat-number {{
                 font-size: 3em;
                 font-weight: bold;
                 color: #667eea;
                 margin-bottom: 10px;
             }}
-            
             .stat-label {{
                 font-size: 1.1em;
                 color: #666;
+                font-weight: 500;
             }}
-            
-            .features {{
+            .nav-grid {{
                 display: grid;
                 grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-                gap: 30px;
+                gap: 25px;
                 margin: 50px 0;
             }}
-            
-            .feature-card {{
-                background: white;
+            .nav-card {{
+                background: rgba(255, 255, 255, 0.95);
                 padding: 40px 30px;
                 border-radius: 15px;
                 text-align: center;
                 box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+                transition: all 0.3s ease;
+                text-decoration: none;
+                color: inherit;
+                backdrop-filter: blur(10px);
             }}
-            
-            .feature-icon {{
+            .nav-card:hover {{
+                transform: translateY(-8px);
+                box-shadow: 0 20px 40px rgba(0,0,0,0.15);
+                text-decoration: none;
+                color: inherit;
+            }}
+            .nav-icon {{
                 font-size: 3em;
                 margin-bottom: 20px;
             }}
-            
-            .feature-card h3 {{
+            .nav-card h3 {{
                 font-size: 1.5em;
                 margin-bottom: 15px;
                 color: #333;
+                font-weight: 700;
             }}
-            
-            .cta-buttons {{
+            .nav-card p {{
+                color: #666;
+                line-height: 1.6;
+            }}
+            .cta-section {{
+                background: rgba(255, 255, 255, 0.95);
+                border-radius: 20px;
+                padding: 50px;
                 text-align: center;
                 margin: 50px 0;
+                box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+                backdrop-filter: blur(10px);
             }}
-            
-            .btn {{
+            .cta-button {{
                 display: inline-block;
-                padding: 15px 30px;
-                margin: 0 10px;
                 background: linear-gradient(135deg, #667eea, #764ba2);
                 color: white;
+                padding: 18px 36px;
                 text-decoration: none;
                 border-radius: 50px;
-                font-size: 1.1em;
+                font-size: 1.2em;
                 font-weight: bold;
                 transition: all 0.3s ease;
                 box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+                margin: 10px;
             }}
-            
-            .btn:hover {{
+            .cta-button:hover {{
                 transform: translateY(-3px);
                 box-shadow: 0 15px 30px rgba(102, 126, 234, 0.4);
-            }}
-            
-            .btn-outline {{
-                background: white;
-                color: #667eea;
-                border: 2px solid #667eea;
-            }}
-            
-            .demo-section {{
-                background: white;
-                border-radius: 20px;
-                padding: 50px;
-                margin: 40px 0;
-                text-align: center;
-            }}
-            
-            .demo-steps {{
-                display: flex;
-                justify-content: space-around;
-                flex-wrap: wrap;
-                margin: 40px 0;
-            }}
-            
-            .demo-step {{
-                flex: 1;
-                min-width: 200px;
-                margin: 20px;
-                padding: 30px;
-            }}
-            
-            .demo-number {{
-                background: #667eea;
                 color: white;
-                width: 50px;
-                height: 50px;
-                border-radius: 50%;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                font-size: 1.5em;
-                font-weight: bold;
-                margin: 0 auto 20px;
+                text-decoration: none;
             }}
-            
-            footer {{
+            .footer {{
                 text-align: center;
                 padding: 40px;
                 color: white;
                 margin-top: 60px;
+            }}
+            @media (max-width: 768px) {{
+                .hero h1 {{
+                    font-size: 2.5em;
+                }}
+                .container {{
+                    padding: 20px 15px;
+                }}
             }}
         </style>
     </head>
@@ -505,100 +490,78 @@ def home():
         <div class="container">
             <!-- Hero Section -->
             <div class="hero">
-                <h1>CivicBot</h1>
-                <p>Your AI-powered assistant for community problem reporting via WhatsApp</p>
-                <div class="cta-buttons">
-                    <a href="/admin" class="btn">Admin Dashboard</a>
-                    <a href="/admin/stats" class="btn btn-outline">View Statistics</a>
+                <h1>🤖 CivicBot</h1>
+                <p>Your AI-powered assistant for community problem reporting via WhatsApp. Making our neighborhood better, one report at a time.</p>
+                <div>
+                    <a href="#features" class="cta-button">Explore Features</a>
+                    <a href="/map" class="cta-button" style="background: linear-gradient(135deg, #28a745, #20c997);">View Live Map</a>
                 </div>
             </div>
             
             <!-- Statistics -->
             <div class="stats">
                 <div class="stat-card">
-                    <div class="stat-number">{total_reports}</div>
+                    <div class="stat-number">{stats['total_reports']}</div>
                     <div class="stat-label">Total Reports</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-number">{resolved_reports}</div>
+                    <div class="stat-number">{stats['resolved_reports']}</div>
                     <div class="stat-label">Issues Resolved</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-number">{unique_users}</div>
-                    <div class="stat-label">Active Users</div>
+                    <div class="stat-number">{stats['reports_with_images']}</div>
+                    <div class="stat-label">Reports with Photos</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-number">24/7</div>
-                    <div class="stat-label">Always Available</div>
+                    <div class="stat-number">{stats['reports_last_7_days']}</div>
+                    <div class="stat-label">Last 7 Days</div>
                 </div>
             </div>
-            
-            <!-- Features -->
-            <div class="features">
-                <div class="feature-card">
-                    <div class="feature-icon"></div>
-                    <h3>WhatsApp Integration</h3>
-                    <p>Report issues directly through WhatsApp - no app installation required!</p>
-                </div>
-                <div class="feature-card">
-                    <div class="feature-icon"></div>
-                    <h3>Photo Evidence</h3>
-                    <p>Attach photos of problems for better understanding and faster resolution</p>
-                </div>
-                <div class="feature-card">
-                    <div class="feature-icon"></div>
-                    <h3>AI-Powered</h3>
-                    <p>Smart categorization and automatic issue detection</p>
-                </div>
-            </div>
-            
-            <!-- Demo Section -->
-            <div class="demo-section">
-                <h2 style="font-size: 2.5em; margin-bottom: 20px; color: #333;">How It Works</h2>
-                <p style="font-size: 1.2em; color: #666; margin-bottom: 40px;">Getting started is as easy as sending a WhatsApp message</p>
+
+            <!-- Navigation Grid -->
+            <div id="features" class="nav-grid">
+                <a href="/map" class="nav-card">
+                    <div class="nav-icon">🗺️</div>
+                    <h3>Live Issue Map</h3>
+                    <p>Interactive map showing all reported issues with real-time updates, filtering, and detailed information.</p>
+                </a>
                 
-                <div class="demo-steps">
-                    <div class="demo-step">
-                        <div class="demo-number">1</div>
-                        <h3>Send Message</h3>
-                        <p>Message our WhatsApp bot with your issue</p>
-                    </div>
-                    <div class="demo-step">
-                        <div class="demo-number">2</div>
-                        <h3>Attach Photo</h3>
-                        <p>Include a photo of the problem</p>
-                    </div>
-                    <div class="demo-step">
-                        <div class="demo-number">3</div>
-                        <h3>Get Tracking ID</h3>
-                        <p>Receive instant confirmation with tracking number</p>
-                    </div>
-                    <div class="demo-step">
-                        <div class="demo-number">4</div>
-                        <h3>Track Progress</h3>
-                        <p>Check status anytime with your report ID</p>
-                    </div>
-                </div>
+                <a href="/admin" class="nav-card">
+                    <div class="nav-icon">📋</div>
+                    <h3>Admin Dashboard</h3>
+                    <p>Manage all reports, update statuses, assign departments, and track resolution progress.</p>
+                </a>
                 
-                <div class="cta-buttons">
-                    <a href="https://wa.me/your-twilio-number" class="btn" style="font-size: 1.3em;">
-                        Start Chatting on WhatsApp
-                    </a>
+                <a href="/admin/stats" class="nav-card">
+                    <div class="nav-icon">📊</div>
+                    <h3>Statistics & Analytics</h3>
+                    <p>Comprehensive analytics with charts, trends, and performance metrics for better decision making.</p>
+                </a>
+                
+                <a href="/admin/advanced" class="nav-card">
+                    <div class="nav-icon">⚙️</div>
+                    <h3>Advanced Management</h3>
+                    <p>Advanced tools for data export, database management, and system configuration.</p>
+                </a>
+            </div>
+
+            <!-- CTA Section -->
+            <div class="cta-section">
+                <h2 style="font-size: 2.5em; margin-bottom: 20px; color: #333;">Ready to Get Started?</h2>
+                <p style="font-size: 1.2em; color: #666; margin-bottom: 30px;">Start reporting issues or explore the admin tools to manage community concerns.</p>
+                <div>
+                    <a href="/admin" class="cta-button">Go to Admin Panel</a>
+                    <a href="/map" class="cta-button" style="background: linear-gradient(135deg, #28a745, #20c997);">Explore Live Map</a>
                 </div>
             </div>
-        </div>
-        <div style="background: #e8f4fd; padding: 20px; border-radius: 10px; margin: 20px 0;">
-        <h3>Want to Test CivicBot?</h3>
-        <p><em>Send a WhatsApp message to: <strong>+14155238886)</strong></em></p>
-        <p><em>With the text: <code>join birth-general</code></em></p>
         </div>
         
-        <footer>
-            <p>Built by A4 Analytics for better communities | CivicBot v1.0</p>
-        </footer>
+        <div class="footer">
+            <p>By A4 Analytics - for better communities | CivicBot v1.0</p>
+        </div>
     </body>
     </html>
-    """
+    '''
     
     
 @app.route('/webhook', methods=['POST'])
@@ -611,87 +574,163 @@ def webhook():
     
     resp = MessagingResponse()
     
-    # Detect intent naturally
-    intent = conversation_engine.detect_intent(incoming_msg)
-    print(f"🎯 Detected intent: {intent}")
-    
-    if intent == 'greeting':
-        response_text = ai_generator.generate_ai_response('greeting')
-    
-    elif intent == 'help':
-        response_text = ai_generator.generate_ai_response('help')
-    
-    elif intent == 'thanks':
-        response_text = ai_generator.generate_ai_response('thanks')
-    
-    elif intent == 'status':
+    try:
+        # Handle greetings
+        if incoming_msg.lower() in ['hello', 'hi', 'hey', 'hola', 'hello!', 'hi!']:
+            response = "👋 Hello there! I'm CivicBot, your friendly neighborhood assistant! I'm here to help you report community issues like potholes, garbage problems, or street light outages. What would you like to report today?"
+        
+        # Handle help requests
+        elif any(word in incoming_msg.lower() for word in ['help', 'what can you do', 'how does this work']):
+            response = """🆘 *Here's how I can help you:*
+
+I can assist with reporting:
+🕳️ *Potholes & Road Damage*
+🗑️ *Garbage & Sanitation Issues*  
+💡 *Street Light Problems*
+💧 *Water Leaks & Flooding*
+🎨 *Graffiti & Vandalism*
+
+*Just send me:* 
+• A description of the issue
+• The location (like 'on Main Street')
+• A photo if possible! 📸
+
+*Examples:*
+'Large pothole on Oak Avenue'
+'Garbage overflowing on 5th Street'
+'Street light out at Maple Drive'"""
+        
+        # Handle thank you messages
+        elif any(word in incoming_msg.lower() for word in ['thank', 'thanks', 'appreciate']):
+            responses = [
+                "You're very welcome! 😊 I'm happy to help make our community better.",
+                "My pleasure! Thanks for being an awesome community member! 🌟",
+                "You're welcome! Together we can keep our neighborhood great!",
+                "Happy to help! Don't hesitate to report any other issues you see! 🏘️"
+            ]
+            import random
+            response = random.choice(responses)
+        
         # Handle status checks
-        if incoming_msg.isdigit():
-            report_info = get_report_status(int(incoming_msg))
-            if report_info:
-                status, issue_type, department = report_info
-                context = {
-                    'report_id': incoming_msg,
-                    'status': status,
-                    'issue_type': issue_type,
-                    'department': department
+        elif incoming_msg.isdigit():
+            report = db_manager.get_report(int(incoming_msg))
+            if report:
+                status_emojis = {
+                    'received': '📥',
+                    'in-progress': '🔄', 
+                    'resolved': '✅'
                 }
-                response_text = ai_generator.generate_ai_response('status_update', context)
+                emoji = status_emojis.get(report['status'], '📋')
+                response = f"{emoji} *Report #{incoming_msg}*\n\n*Issue:* {report['issue_type'].replace('_', ' ').title()}\n*Location:* {report['location']}\n*Status:* {report['status'].replace('-', ' ').title()}\n*Submitted:* {report['created_at'][:10]}\n\nWe're on it! Thanks for your patience. 🙏"
             else:
-                response_text = f"I couldn't find a report with ID #{incoming_msg}. Could you double-check the number?"
+                response = f"❌ I couldn't find a report with ID #{incoming_msg}. Please check the number and try again. If you need help, just type 'help'!"
+        
+        # Handle image reports
+        elif num_media > 0:
+            image_url = request.values.get('MediaUrl0')
+            
+            # Try to analyze the message for issue type and location
+            if nlp_engine:
+                analysis = nlp_engine.analyze_message(incoming_msg)
+                issue_type = analysis['primary_issue']
+                location = analysis['location']
+                department = analysis['department']
+            else:
+                issue_type = 'other'
+                location = 'Unknown location'
+                department = 'public_works'
+            
+            # Geocode location
+            lat, lng = geocoder.geocode_location(location) if 'geocoder' in globals() else (None, None)
+            
+            # Save report
+            report_data = {
+                'phone': sender_phone,
+                'issue_type': issue_type,
+                'description': incoming_msg or 'Photo report',
+                'location': location,
+                'image_url': image_url,
+                'department': department,
+                'latitude': lat,
+                'longitude': lng
+            }
+            
+            report_id = db_manager.create_report(report_data)
+            
+            responses = [
+                f"📸 *Excellent! Photo received!*\n\nI've logged your {issue_type.replace('_', ' ')} report at {location}.\n*Report ID:* #{report_id}\n\nOur team will review the photo and take appropriate action. Thank you for the visual evidence! 🎯",
+                f"📸 *Great photo! Thanks!*\n\nYour {issue_type.replace('_', ' ')} report at {location} has been documented.\n*Tracking ID:* #{report_id}\n\nThe photo really helps us understand the situation better. We'll get on this! 👍",
+                f"📸 *Perfect! Visual evidence captured!*\n\nReport #{report_id} has been created for the {issue_type.replace('_', ' ')} at {location}.\n\nYour photo makes it much easier to assess the issue. Thank you for your thorough reporting! 📝"
+            ]
+            import random
+            response = random.choice(responses)
+        
+        # Handle regular text reports
         else:
-            response_text = "To check a report status, just send me the report number! Like '123'"
+            if nlp_engine:
+                analysis = nlp_engine.analyze_message(incoming_msg)
+                issue_type = analysis['primary_issue']
+                location = analysis['location']
+                department = analysis['department']
+                confidence = analysis['confidence']
+            else:
+                # Basic keyword matching as fallback
+                issue_type = 'other'
+                location = 'Unknown location'
+                department = 'public_works'
+                confidence = 0.5
+            
+            # Geocode location
+            lat, lng = geocoder.geocode_location(location) if 'geocoder' in globals() else (None, None)
+            
+            # Save report
+            report_data = {
+                'phone': sender_phone,
+                'issue_type': issue_type,
+                'description': incoming_msg,
+                'location': location,
+                'department': department,
+                'latitude': lat,
+                'longitude': lng
+            }
+            
+            report_id = db_manager.create_report(report_data)
+            
+            # Build response based on confidence
+            if confidence > 0.7:
+                base_responses = [
+                    f"✅ *Report received!*\n\nI've logged the {issue_type.replace('_', ' ')} at {location}.\n*Report ID:* #{report_id}\n\nOur {department.replace('_', ' ').title()} team has been notified. Thank you for your report! 🏘️",
+                    f"📋 *Thank you for reporting!*\n\nYour {issue_type.replace('_', ' ')} issue at {location} is now documented.\n*Tracking ID:* #{report_id}\n\nWe'll work on resolving this. Your community spirit is appreciated! 🌟",
+                    f"🎯 *Report submitted successfully!*\n\n{issue_type.replace('_', ' ').title()} at {location} has been recorded.\n*Reference ID:* #{report_id}\n\nThanks for helping keep our neighborhood great! 🙌"
+                ]
+            else:
+                base_responses = [
+                    f"📝 *Report logged!*\n\nI've created report #{report_id} for the issue at {location}.\n*Note:* I'm not entirely sure about the issue type, so our team will review it.\n\nThank you for your report! 💫",
+                    f"✅ *Got it!*\n\nReport #{report_id} has been created for the situation at {location}.\nOur team will assess the exact issue type and take action.\n\nWe appreciate you speaking up! 🗣️"
+                ]
+            
+            # Add photo suggestion
+            photo_tips = [
+                "\n\n💡 *Pro tip:* Next time, include a photo for faster resolution! 📸",
+                "\n\n📸 *Helpful hint:* Photos help us understand issues better!",
+                "\n\n🎯 *FYI:* Visual evidence often leads to quicker action!"
+            ]
+            import random
+            response = random.choice(base_responses) + random.choice(photo_tips)
+        
+        msg = resp.message(response)
+        
+    except Exception as e:
+        print(f"❌ Webhook error: {e}")
+        # Fallback response
+        fallback_responses = [
+            "🤖 Oops! I'm having a little trouble right now. Please try again in a moment, or describe your issue in a different way.",
+            "⚠️ Sorry, I didn't quite get that. Could you try rephrasing? For example: 'pothole on Main Street' or 'garbage issue on Oak Avenue'.",
+            "❌ My apologies! I'm experiencing a temporary issue. Please try your report again, or say 'help' for assistance."
+        ]
+        import random
+        msg = resp.message(random.choice(fallback_responses))
     
-    elif intent == 'report' or (num_media > 0 and incoming_msg):
-        # Process reports with natural language
-        analysis = nlp_engine.analyze_message(incoming_msg)
-        print(f"🧠 Analysis: {analysis}")
-        
-        # Handle image if present
-        image_url = request.values.get('MediaUrl0') if num_media > 0 else None
-        vision_analysis = analyze_image_with_vision(image_url) if image_url and 'analyze_image_with_vision' in globals() else None
-        
-        # Determine final issue type
-        final_issue_type = _resolve_issue_type(analysis, vision_analysis)
-        
-        # Geocode location
-        lat, lng = geocode_location(analysis['location'])
-        
-        # Save report
-        report_id = save_report(
-            phone=sender_phone,
-            issue_type=final_issue_type,
-            description=incoming_msg,
-            location=analysis['location'],
-            image_url=image_url,
-            lat=lat,
-            lng=lng,
-            department=analysis['department']
-        )
-        
-        # Create context for AI response
-        context = {
-            'issue': final_issue_type.replace('_', ' '),
-            'location': analysis['location'],
-            'report_id': report_id,
-            'department': analysis['department'].replace('_', ' ').title(),
-            'urgency': analysis['urgency'],
-            'confidence': analysis['confidence'],
-            'has_photo': bool(image_url)
-        }
-        
-        # Generate natural AI response
-        response_text = ai_generator.generate_ai_response('report_received', context)
-    
-    elif num_media > 0 and not incoming_msg:
-        # Photo only without text
-        response_text = "Thanks for the photo! Could you tell me what issue you're reporting and where it's located?"
-    
-    else:
-        # Unknown message
-        response_text = ai_generator.generate_ai_response('unknown')
-    
-    msg = resp.message(response_text)
     return str(resp)
 
 def _resolve_issue_type(nlp_analysis, vision_analysis):
@@ -703,103 +742,120 @@ def _resolve_issue_type(nlp_analysis, vision_analysis):
     return nlp_analysis['primary_issue']
 
 @app.route('/admin')
-def admin_dashboard():
-    conn = sqlite3.connect('civicbot.db')
-    c = conn.cursor()
-    c.execute("SELECT * FROM reports ORDER BY created_at DESC")
-    reports = c.fetchall()
-    conn.close()
+def admin():
+    stats = db_manager.get_dashboard_stats()
+    reports = db_manager.get_reports(per_page=20)['reports']
     
-    # Using f-strings to avoid formatting conflicts
-    html = f"""
+    html = f'''
     <html>
     <head>
         <title>CivicBot Admin</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
-            body {{ font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }}
-            .header {{ background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin-bottom: 20px; }}
-            .report {{ background: white; border: 1px solid #ddd; padding: 20px; margin: 15px 0; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
-            .status-received {{ border-left: 5px solid #ffc107; }}
-            .status-in-progress {{ border-left: 5px solid #17a2b8; }}
-            .status-resolved {{ border-left: 5px solid #28a745; }}
-            .image {{ max-width: 300px; max-height: 200px; margin: 10px 0; border-radius: 5px; }}
-            .btn {{ background: #007bff; color: white; padding: 8px 15px; border: none; border-radius: 4px; cursor: pointer; }}
-            .nav {{ margin: 20px 0; }}
-            .nav a {{ background: #6c757d; color: white; padding: 10px 15px; text-decoration: none; border-radius: 4px; margin-right: 10px; }}
+            body {{ font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }}
+            .header {{ background: white; padding: 30px; border-radius: 10px; margin-bottom: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+            .nav-buttons {{ display: flex; gap: 10px; margin: 20px 0; flex-wrap: wrap; }}
+            .nav-btn {{ background: #007bff; color: white; padding: 12px 20px; text-decoration: none; border-radius: 6px; font-weight: bold; }}
+            .nav-btn:hover {{ background: #0056b3; }}
+            .stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 20px 0; }}
+            .stat-card {{ background: white; padding: 20px; border-radius: 8px; text-align: center; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }}
+            .table {{ background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+            table {{ width: 100%; border-collapse: collapse; }}
+            th, td {{ padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }}
+            th {{ background: #f8f9fa; font-weight: bold; }}
         </style>
     </head>
     <body>
         <div class="header">
             <h1>🏢 CivicBot Admin Dashboard</h1>
-            <p>Total Reports: <strong>{len(reports)}</strong></p>
-            <div class="nav">
-                <a href="/admin/stats">📊 View Statistics</a>
-                <a href="/">🏠 Home</a>
+            <p>Manage community reports and track resolution progress</p>
+            
+            <div class="nav-buttons">
+                <a href="/" class="nav-btn">🏠 Home</a>
+                <a href="/map" class="nav-btn">🗺️ Live Map</a>
+                <a href="/admin/stats" class="nav-btn">📊 Statistics</a>
+                <a href="/admin/advanced" class="nav-btn">⚙️ Advanced</a>
+                <a href="/admin/export/csv" class="nav-btn">📥 Export CSV</a>
             </div>
-        </div>
-        <div class="reports">
-    """
-    
-    if not reports:
-        html += """
-        <div class="report">
-            <h3>No reports yet</h3>
-            <p>When users send reports via WhatsApp, they will appear here.</p>
-        </div>
-        """
-    else:
-        for report in reports:
-            # report structure: [id, phone, issue_type, description, location, image_url, status, created_at]
-            report_id = report[0]
-            phone = report[1] or 'N/A'
-            issue_type = report[2] or 'Unknown Issue'
-            description = report[3] or 'No description'
-            location = report[4] or 'Unknown location'
-            image_url = report[5]  # This is the image_url field
-            status = report[6] or 'received'
-            created_at = report[7] or 'Unknown date'
             
-            status_class = f"status-{status}"
-            
-            # Image HTML if available
-            image_html = ""
-            if image_url:
-                image_html = f'''
-                <div style="margin: 10px 0;">
-                    <strong>📸 Photo Evidence:</strong><br>
-                    <img src="{image_url}" class="image" alt="Report Photo" 
-                         onerror="this.style.display='none'">
+            <div class="stats">
+                <div class="stat-card">
+                    <div style="font-size: 2em; font-weight: bold; color: #007bff;">{stats['total_reports']}</div>
+                    <div>Total Reports</div>
                 </div>
-                '''
-            
-            html += f"""
-            <div class="report {status_class}">
-                <h3>Report #{report_id} - {issue_type.title()}</h3>
-                <p><strong>From:</strong> {phone}</p>
-                <p><strong>Description:</strong> {description}</p>
-                <p><strong>Location:</strong> {location}</p>
-                {image_html}
-                <p><strong>Status:</strong> {status.upper()}</p>
-                <p><strong>Submitted:</strong> {created_at}</p>
-                
-                <form action="/update_status" method="post" style="margin-top: 15px;">
-                    <input type="hidden" name="report_id" value="{report_id}">
-                    <label><strong>Update Status:</strong></label>
-                    <select name="status">
-                        <option value="received" {'selected' if status=='received' else ''}>Received</option>
-                        <option value="in-progress" {'selected' if status=='in-progress' else ''}>In Progress</option>
-                        <option value="resolved" {'selected' if status=='resolved' else ''}>Resolved</option>
-                    </select>
-                    <button type="submit" class="btn">Update</button>
-                </form>
+                <div class="stat-card">
+                    <div style="font-size: 2em; font-weight: bold; color: #28a745;">{stats['resolved_reports']}</div>
+                    <div>Resolved</div>
+                </div>
+                <div class="stat-card">
+                    <div style="font-size: 2em; font-weight: bold; color: #17a2b8;">{stats['reports_with_images']}</div>
+                    <div>With Photos</div>
+                </div>
+                <div class="stat-card">
+                    <div style="font-size: 2em; font-weight: bold; color: #ffc107;">{stats['reports_last_7_days']}</div>
+                    <div>Last 7 Days</div>
+                </div>
             </div>
-            """
-    
-    html += """
         </div>
+
+        <div class="table">
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Issue Type</th>
+                        <th>Location</th>
+                        <th>Status</th>
+                        <th>Department</th>
+                        <th>Created</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+    '''
+    
+    for report in reports:
+        status_badge = {
+            'received': '<span style="background: #ffc107; color: black; padding: 4px 8px; border-radius: 12px; font-size: 12px;">RECEIVED</span>',
+            'in-progress': '<span style="background: #17a2b8; color: white; padding: 4px 8px; border-radius: 12px; font-size: 12px;">IN PROGRESS</span>',
+            'resolved': '<span style="background: #28a745; color: white; padding: 4px 8px; border-radius: 12px; font-size: 12px;">RESOLVED</span>'
+        }.get(report['status'], report['status'])
+        
+        html += f'''
+                    <tr>
+                        <td>#{report['id']}</td>
+                        <td>{report['issue_type'].replace('_', ' ').title()}</td>
+                        <td>{report['location']}</td>
+                        <td>{status_badge}</td>
+                        <td>{report.get('department', 'N/A').replace('_', ' ').title()}</td>
+                        <td>{report['created_at'][:16].replace('T', ' ')}</td>
+                        <td>
+                            <a href="/admin/report/{report['id']}" style="background: #6c757d; color: white; padding: 6px 12px; text-decoration: none; border-radius: 4px; font-size: 12px;">View</a>
+                            <button onclick="updateStatus({report['id']}, 'resolved')" style="background: #28a745; color: white; border: none; padding: 6px 12px; border-radius: 4px; font-size: 12px; cursor: pointer; margin-left: 5px;">Resolve</button>
+                        </td>
+                    </tr>
+        '''
+    
+    html += '''
+                </tbody>
+            </table>
+        </div>
+
+        <script>
+            function updateStatus(reportId, status) {
+                if (confirm('Mark report #' + reportId + ' as ' + status + '?')) {
+                    fetch('/admin/api/update_report', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({report_id: reportId, status: status})
+                    }).then(() => location.reload());
+                }
+            }
+        </script>
     </body>
     </html>
-    """
+    '''
+    
     return html
 
 
@@ -938,194 +994,892 @@ def admin_stats():
     
     return html
 
-@app.route('/map')
-def map_dashboard():
-    """Interactive map showing all reports with real geolocation"""
-    conn = sqlite3.connect('civicbot.db')
-    c = conn.cursor()
+# Enhanced Admin Dashboard Routes
+@app.route('/admin/advanced')
+def advanced_admin():
+    """Advanced admin dashboard with data management"""
+    stats = db_manager.get_dashboard_stats()
+    trends = db_manager.get_trends_data(days=30)
     
-    # Get reports with coordinates
-    c.execute("""
-        SELECT id, issue_type, description, location, latitude, longitude, status, created_at, image_url 
-        FROM reports 
-        WHERE latitude IS NOT NULL AND longitude IS NOT NULL
-        ORDER BY created_at DESC
-    """)
-    reports = c.fetchall()
-    conn.close()
-    
-    # Convert to GeoJSON
-    features = []
-    for report in reports:
-        feature = {
-            "type": "Feature",
-            "geometry": {
-                "type": "Point",
-                "coordinates": [report[5], report[4]]  # [lng, lat]
-            },
-            "properties": {
-                "id": report[0],
-                "issue_type": report[1],
-                "description": report[2],
-                "location": report[3],
-                "status": report[6],
-                "created_at": report[7],
-                "has_image": bool(report[8])
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>CivicBot - Advanced Admin</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+        <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+        <style>
+            .dashboard-card { background: white; border-radius: 10px; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+            .stat-number { font-size: 2.5em; font-weight: bold; color: #007bff; }
+            .nav-pills .nav-link.active { background: #007bff; }
+            .export-btn { margin: 5px; }
+        </style>
+    </head>
+    <body>
+        <div class="container-fluid">
+            <!-- Header -->
+            <div class="row bg-primary text-white p-3 mb-4">
+                <div class="col">
+                    <h1><i class="fas fa-cogs"></i> CivicBot Advanced Admin</h1>
+                    <p class="mb-0">Comprehensive Database Management & Analytics</p>
+                </div>
+            </div>
+
+            <!-- Navigation -->
+            <div class="row mb-4">
+                <div class="col">
+                    <ul class="nav nav-pills">
+                        <li class="nav-item">
+                            <a class="nav-link active" href="#dashboard" data-bs-toggle="tab">Dashboard</a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="#reports" data-bs-toggle="tab">Report Management</a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="#analytics" data-bs-toggle="tab">Analytics</a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="#export" data-bs-toggle="tab">Data Export</a>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Tab Content -->
+            <div class="tab-content">
+                <!-- Dashboard Tab -->
+                <div class="tab-pane fade show active" id="dashboard">
+                    <div class="row">
+                        <!-- Key Metrics -->
+                        <div class="col-md-3">
+                            <div class="dashboard-card text-center">
+                                <i class="fas fa-file-alt fa-2x text-primary mb-2"></i>
+                                <div class="stat-number">{{ stats.total_reports }}</div>
+                                <div class="text-muted">Total Reports</div>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="dashboard-card text-center">
+                                <i class="fas fa-check-circle fa-2x text-success mb-2"></i>
+                                <div class="stat-number">{{ stats.resolved_reports }}</div>
+                                <div class="text-muted">Resolved</div>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="dashboard-card text-center">
+                                <i class="fas fa-camera fa-2x text-info mb-2"></i>
+                                <div class="stat-number">{{ stats.reports_with_images }}</div>
+                                <div class="text-muted">With Photos</div>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="dashboard-card text-center">
+                                <i class="fas fa-chart-line fa-2x text-warning mb-2"></i>
+                                <div class="stat-number">{{ stats.reports_last_7_days }}</div>
+                                <div class="text-muted">Last 7 Days</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Charts -->
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="dashboard-card">
+                                <h5>Reports by Status</h5>
+                                <canvas id="statusChart" height="200"></canvas>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="dashboard-card">
+                                <h5>Reports by Issue Type</h5>
+                                <canvas id="issueTypeChart" height="200"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Report Management Tab -->
+                <div class="tab-pane fade" id="reports">
+                    <div class="dashboard-card">
+                        <h4><i class="fas fa-filter"></i> Report Management</h4>
+                        
+                        <!-- Filters -->
+                        <div class="row mb-3">
+                            <div class="col-md-3">
+                                <select class="form-select" id="statusFilter">
+                                    <option value="">All Statuses</option>
+                                    <option value="received">Received</option>
+                                    <option value="in-progress">In Progress</option>
+                                    <option value="resolved">Resolved</option>
+                                </select>
+                            </div>
+                            <div class="col-md-3">
+                                <select class="form-select" id="issueTypeFilter">
+                                    <option value="">All Issue Types</option>
+                                    {% for issue_type in stats.issue_type_distribution.keys() %}
+                                    <option value="{{ issue_type }}">{{ issue_type.title() }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div class="col-md-3">
+                                <input type="text" class="form-control" id="searchFilter" placeholder="Search...">
+                            </div>
+                            <div class="col-md-3">
+                                <button class="btn btn-primary w-100" onclick="loadReports()">Apply Filters</button>
+                            </div>
+                        </div>
+
+                        <!-- Reports Table -->
+                        <div id="reportsTable">
+                            <!-- Dynamic content will be loaded here -->
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Analytics Tab -->
+                <div class="tab-pane fade" id="analytics">
+                    <div class="dashboard-card">
+                        <h4><i class="fas fa-chart-bar"></i> Advanced Analytics</h4>
+                        <div class="row">
+                            <div class="col-md-8">
+                                <canvas id="trendsChart" height="300"></canvas>
+                            </div>
+                            <div class="col-md-4">
+                                <h6>Performance Metrics</h6>
+                                <ul class="list-group">
+                                    <li class="list-group-item">
+                                        Average Resolution Time
+                                        <span class="badge bg-primary float-end">{{ "%.1f"|format(stats.avg_resolution_days) }} days</span>
+                                    </li>
+                                    <li class="list-group-item">
+                                        Resolution Rate
+                                        <span class="badge bg-success float-end">
+                                            {{ "%.1f"|format((stats.resolved_reports / stats.total_reports * 100) if stats.total_reports > 0 else 0) }}%
+                                        </span>
+                                    </li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Data Export Tab -->
+                <div class="tab-pane fade" id="export">
+                    <div class="dashboard-card">
+                        <h4><i class="fas fa-download"></i> Data Export</h4>
+                        <p>Export your data in various formats for analysis and reporting.</p>
+                        
+                        <div class="row">
+                            <div class="col-md-6">
+                                <div class="card">
+                                    <div class="card-body">
+                                        <h5 class="card-title">Quick Export</h5>
+                                        <p class="card-text">Export all current data:</p>
+                                        <a href="/admin/export/csv" class="btn btn-success export-btn">
+                                            <i class="fas fa-file-csv"></i> CSV Export
+                                        </a>
+                                        <a href="/admin/export/json" class="btn btn-warning export-btn">
+                                            <i class="fas fa-file-code"></i> JSON Export
+                                        </a>
+                                        <a href="/admin/export/excel" class="btn btn-primary export-btn">
+                                            <i class="fas fa-file-excel"></i> Excel Export
+                                        </a>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="card">
+                                    <div class="card-body">
+                                        <h5 class="card-title">Database Management</h5>
+                                        <p class="card-text">Database maintenance tools:</p>
+                                        <a href="/admin/backup" class="btn btn-info export-btn">
+                                            <i class="fas fa-database"></i> Create Backup
+                                        </a>
+                                        <a href="/admin/cleanup" class="btn btn-secondary export-btn" onclick="return confirm('Archive old resolved reports?')">
+                                            <i class="fas fa-broom"></i> Cleanup Old Data
+                                        </a>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+        <script>
+            // Initialize charts
+            const statusData = {{ stats.status_distribution | tojson }};
+            const issueTypeData = {{ stats.issue_type_distribution | tojson }};
+            const trendsData = {{ trends | tojson }};
+
+            // Status Chart
+            new Chart(document.getElementById('statusChart'), {
+                type: 'doughnut',
+                data: {
+                    labels: Object.keys(statusData),
+                    datasets: [{
+                        data: Object.values(statusData),
+                        backgroundColor: ['#ffc107', '#17a2b8', '#28a745']
+                    }]
+                }
+            });
+
+            // Issue Type Chart
+            new Chart(document.getElementById('issueTypeChart'), {
+                type: 'bar',
+                data: {
+                    labels: Object.keys(issueTypeData).map(k => k.replace('_', ' ').titleCase()),
+                    datasets: [{
+                        label: 'Reports',
+                        data: Object.values(issueTypeData),
+                        backgroundColor: '#007bff'
+                    }]
+                }
+            });
+
+            // Load initial reports
+            loadReports();
+
+            function loadReports(page = 1) {
+                const filters = {
+                    status: document.getElementById('statusFilter').value,
+                    issue_type: document.getElementById('issueTypeFilter').value,
+                    search: document.getElementById('searchFilter').value
+                };
+
+                fetch('/admin/api/reports?page=' + page + '&' + new URLSearchParams(filters))
+                    .then(r => r.json())
+                    .then(data => {
+                        document.getElementById('reportsTable').innerHTML = data.html;
+                    });
             }
-        }
-        features.append(feature)
-    
-    geojson_data = json.dumps({
-        "type": "FeatureCollection",
-        "features": features
-    })
-    
-    return f'''
+
+            // Helper function for title case
+            String.prototype.titleCase = function() {
+                return this.split('_').map(word => 
+                    word.charAt(0).toUpperCase() + word.slice(1)
+                ).join(' ');
+            };
+        </script>
+    </body>
+    </html>
+    ''', stats=stats, trends=trends)
+
+
+
+
+@app.route('/map')
+def interactive_map():
+    """Fully functional interactive map"""
+    return '''
     <!DOCTYPE html>
     <html>
     <head>
         <title>CivicBot - Live Issue Map</title>
+        <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+        <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+        <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
         <style>
-            #map {{ height: 70vh; width: 100%; }}
-            body {{ margin: 0; font-family: Arial, sans-serif; }}
-            .header {{ background: #2c3e50; color: white; padding: 20px; }}
-            .controls {{ background: #34495e; padding: 15px; color: white; }}
-            .legend {{ background: white; padding: 10px; border-radius: 5px; position: absolute; bottom: 20px; right: 20px; z-index: 1000; }}
-            .cluster-marker {{ background: #e74c3c; color: white; border-radius: 50%; text-align: center; font-weight: bold; }}
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body { 
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                background: #f8f9fa;
+            }
+            #map { 
+                height: 100vh; 
+                width: 100%;
+            }
+            .header {
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                padding: 25px;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            }
+            .controls {
+                background: white;
+                padding: 20px;
+                border-bottom: 1px solid #e9ecef;
+                display: flex;
+                align-items: center;
+                gap: 15px;
+                flex-wrap: wrap;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            }
+            .stats-bar {
+                background: #343a40;
+                color: white;
+                padding: 12px 25px;
+                display: flex;
+                gap: 25px;
+                font-size: 14px;
+                font-weight: 500;
+            }
+            .filter-btn {
+                background: #6c757d;
+                color: white;
+                border: none;
+                padding: 10px 20px;
+                border-radius: 25px;
+                cursor: pointer;
+                font-size: 14px;
+                font-weight: 500;
+                transition: all 0.3s ease;
+            }
+            .filter-btn.active, .filter-btn:hover {
+                background: #007bff;
+                transform: translateY(-2px);
+                box-shadow: 0 4px 8px rgba(0,123,255,0.3);
+            }
+            .nav-btn {
+                background: #28a745;
+                color: white;
+                text-decoration: none;
+                padding: 10px 20px;
+                border-radius: 6px;
+                font-size: 14px;
+                font-weight: 500;
+                transition: all 0.3s ease;
+            }
+            .nav-btn:hover {
+                background: #218838;
+                transform: translateY(-2px);
+                box-shadow: 0 4px 8px rgba(40,167,69,0.3);
+            }
+            .legend {
+                background: white;
+                padding: 20px;
+                border-radius: 12px;
+                box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+                position: absolute;
+                bottom: 25px;
+                right: 25px;
+                z-index: 1000;
+                max-width: 280px;
+                backdrop-filter: blur(10px);
+            }
+            .legend-item {
+                display: flex;
+                align-items: center;
+                margin: 8px 0;
+                font-size: 13px;
+                font-weight: 500;
+            }
+            .legend-color {
+                width: 22px;
+                height: 22px;
+                border-radius: 50%;
+                margin-right: 12px;
+                border: 3px solid white;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+            }
+            .loading {
+                position: absolute;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                background: white;
+                padding: 20px 30px;
+                border-radius: 10px;
+                box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+                z-index: 1000;
+                font-weight: 500;
+            }
         </style>
     </head>
     <body>
+        <!-- Header -->
         <div class="header">
-            <h1>🗺️ CivicBot Live Issue Map</h1>
-            <p>Real-time visualization of community reports with AI analysis</p>
-        </div>
-        
-        <div class="controls">
-            <a href="/admin" style="color: white; margin-right: 15px;">📋 List View</a>
-            <a href="/admin/stats" style="color: white; margin-right: 15px;">📊 Statistics</a>
-            <a href="/" style="color: white;">🏠 Home</a>
+            <h1 style="margin: 0; font-size: 28px; font-weight: 700;">🗺️ CivicBot Live Issue Map</h1>
+            <p style="margin: 8px 0 0 0; opacity: 0.9; font-size: 16px;">Real-time visualization of all community reports with interactive filtering</p>
         </div>
 
-        <div id="map"></div>
+        <!-- Statistics Bar -->
+        <div class="stats-bar">
+            <div>📊 <strong id="total-reports">0</strong> Total Reports</div>
+            <div>🕐 Last Updated: <span id="last-updated">Just now</span></div>
+            <div>👁️ <span id="visible-reports">0</span> Currently Visible</div>
+        </div>
+
+        <!-- Controls -->
+        <div class="controls">
+            <strong style="color: #495057;">Filter Issues:</strong>
+            <button class="filter-btn active" data-issue="all">🌐 All Issues</button>
+            <button class="filter-btn" data-issue="pothole">🕳️ Potholes</button>
+            <button class="filter-btn" data-issue="garbage">🗑️ Garbage</button>
+            <button class="filter-btn" data-issue="street_light">💡 Street Lights</button>
+            <button class="filter-btn" data-issue="water_issue">💧 Water Issues</button>
+            <button class="filter-btn" data-issue="graffiti">🎨 Graffiti</button>
+            <button class="filter-btn" data-issue="other">📋 Other</button>
+            
+            <div style="margin-left: auto; display: flex; gap: 12px;">
+                <a href="/admin" class="nav-btn">📋 Admin Dashboard</a>
+                <a href="/admin/stats" class="nav-btn">📊 Statistics</a>
+                <a href="/" class="nav-btn">🏠 Home</a>
+            </div>
+        </div>
+
+        <!-- Map Container -->
+        <div id="map">
+            <div class="loading">
+                <div style="text-align: center;">
+                    <div style="font-size: 24px; margin-bottom: 10px;">🗺️</div>
+                    <div>Loading interactive map...</div>
+                </div>
+            </div>
+        </div>
 
         <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
         <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
-        <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
         
         <script>
             // Initialize map
-            var map = L.map('map').setView([7.97156, 3.613074], 12);
+            var map = L.map('map').setView([40.7128, -74.0060], 12);
             
             // Add tile layer
-            L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
-                attribution: '© OpenStreetMap contributors'
-            }}).addTo(map);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '© OpenStreetMap contributors',
+                maxZoom: 19
+            }).addTo(map);
             
             // Create marker cluster group
-            var markers = L.markerClusterGroup();
+            var markers = L.markerClusterGroup({
+                chunkedLoading: true,
+                maxClusterRadius: 50,
+                spiderfyOnMaxZoom: true,
+                showCoverageOnHover: true
+            });
             
-            // Issue type icons and colors
-            var issueStyles = {{
-                'pothole': {{icon: '🕳️', color: '#e74c3c'}},
-                'garbage': {{icon: '🗑️', color: '#f39c12'}},
-                'water_issue': {{icon: '💧', color: '#3498db'}},
-                'traffic': {{icon: '🚦', color: '#9b59b6'}},
-                'street_light': {{icon: '💡', color: '#f1c40f'}},
-                'graffiti': {{icon: '🎨', color: '#e67e22'}},
-                'other': {{icon: '📋', color: '#95a5a6'}}
-            }};
+            // Issue type styling
+            var issueStyles = {
+                'pothole': { emoji: '🕳️', color: '#e74c3c', name: 'Pothole' },
+                'garbage': { emoji: '🗑️', color: '#f39c12', name: 'Garbage' },
+                'street_light': { emoji: '💡', color: '#f1c40f', name: 'Street Light' },
+                'water_issue': { emoji: '💧', color: '#3498db', name: 'Water Issue' },
+                'graffiti': { emoji: '🎨', color: '#9b59b6', name: 'Graffiti' },
+                'noise': { emoji: '📢', color: '#e67e22', name: 'Noise' },
+                'traffic': { emoji: '🚦', color: '#d35400', name: 'Traffic' },
+                'other': { emoji: '📋', color: '#95a5a6', name: 'Other' }
+            };
             
-            var statusColors = {{
-                'received': '#f39c12',
-                'in-progress': '#3498db',
-                'resolved': '#27ae60'
-            }};
+            var statusColors = {
+                'received': '#f39c12',    // Orange
+                'in-progress': '#3498db', // Blue
+                'resolved': '#27ae60'     // Green
+            };
             
-            // Add reports to map
-            var reports = {geojson_data};
+            var currentMarkers = [];
+            var allReports = [];
             
-            reports.features.forEach(function(feature) {{
-                var style = issueStyles[feature.properties.issue_type] || issueStyles['other'];
-                var statusColor = statusColors[feature.properties.status] || '#95a5a6';
+            // Load reports data
+            function loadReports() {
+                fetch('/api/reports/geojson')
+                    .then(response => {
+                        if (!response.ok) throw new Error('Network error');
+                        return response.json();
+                    })
+                    .then(data => {
+                        document.querySelector('.loading').style.display = 'none';
+                        allReports = data.features;
+                        updateMap(allReports);
+                        updateStats();
+                    })
+                    .catch(error => {
+                        console.error('Error loading reports:', error);
+                        document.querySelector('.loading').innerHTML = `
+                            <div style="text-align: center; color: #dc3545;">
+                                <div style="font-size: 24px; margin-bottom: 10px;">❌</div>
+                                <div>Failed to load map data</div>
+                                <button onclick="loadReports()" style="margin-top: 10px; padding: 8px 16px; background: #dc3545; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                                    Retry
+                                </button>
+                            </div>
+                        `;
+                    });
+            }
+            
+            // Update map with reports
+            function updateMap(reports) {
+                // Clear existing markers
+                markers.clearLayers();
+                currentMarkers = [];
                 
-                // Create custom icon
-                var icon = L.divIcon({{
-                    html: `<div style="background: ${{statusColor}}; color: white; border: 3px solid ${{style.color}}; border-radius: 50%; width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; font-size: 18px;">${{style.icon}}</div>`,
-                    className: 'custom-marker',
-                    iconSize: [40, 40],
-                    iconAnchor: [20, 20]
-                }});
+                if (reports.length === 0) {
+                    // Show message when no reports
+                    L.popup()
+                        .setLatLng([40.7128, -74.0060])
+                        .setContent('<div style="text-align: center; padding: 20px;"><h3>No Reports Yet</h3><p>When reports are made, they will appear here.</p></div>')
+                        .openOn(map);
+                    return;
+                }
                 
-                var marker = L.marker([
-                    feature.geometry.coordinates[1],
-                    feature.geometry.coordinates[0]
-                ], {{icon: icon}});
-                
-                // Create popup content
-                var popupContent = `
-                    <div style="min-width: 250px;">
-                        <h3>${{style.icon}} Report #${{feature.properties.id}}</h3>
-                        <p><strong>Type:</strong> ${{feature.properties.issue_type}}</p>
-                        <p><strong>Status:</strong> <span style="color: ${{statusColor}}; font-weight: bold;">${{feature.properties.status}}</span></p>
-                        <p><strong>Location:</strong> ${{feature.properties.location}}</p>
-                        <p><strong>Description:</strong> ${{feature.properties.description}}</p>
-                        <p><strong>Reported:</strong> ${{new Date(feature.properties.created_at).toLocaleDateString()}}</p>
-                        ${{feature.properties.has_image ? '<p>📸 <em>Includes photo evidence</em></p>' : ''}}
-                        <div style="margin-top: 10px;">
-                            <a href="/admin" target="_blank" style="background: #3498db; color: white; padding: 5px 10px; text-decoration: none; border-radius: 3px;">View Details</a>
+                reports.forEach(function(feature) {
+                    var properties = feature.properties;
+                    var style = issueStyles[properties.issue_type] || issueStyles['other'];
+                    var statusColor = statusColors[properties.status] || '#95a5a6';
+                    
+                    // Create custom icon
+                    var icon = L.divIcon({
+                        html: `
+                            <div style="
+                                background: ${statusColor};
+                                color: white;
+                                border: 3px solid ${style.color};
+                                border-radius: 50%;
+                                width: 48px;
+                                height: 48px;
+                                display: flex;
+                                align-items: center;
+                                justify-content: center;
+                                font-size: 20px;
+                                box-shadow: 0 3px 8px rgba(0,0,0,0.3);
+                                cursor: pointer;
+                                transition: all 0.3s ease;
+                            " onmouseover="this.style.transform='scale(1.1)'" onmouseout="this.style.transform='scale(1)'">
+                                ${style.emoji}
+                            </div>
+                        `,
+                        className: 'custom-marker',
+                        iconSize: [48, 48],
+                        iconAnchor: [24, 24]
+                    });
+                    
+                    var marker = L.marker([
+                        feature.geometry.coordinates[1],
+                        feature.geometry.coordinates[0]
+                    ], { icon: icon });
+                    
+                    // Create detailed popup
+                    var popupContent = `
+                        <div style="min-width: 300px; font-family: Arial, sans-serif;">
+                            <div style="background: ${style.color}; color: white; padding: 20px; margin: -16px -16px 20px -16px; border-radius: 8px 8px 0 0;">
+                                <h3 style="margin: 0; font-size: 20px;">${style.emoji} ${style.name}</h3>
+                                <p style="margin: 5px 0 0 0; opacity: 0.9; font-size: 14px;">Report #${properties.id}</p>
+                            </div>
+                            
+                            <div style="margin-bottom: 20px;">
+                                <p style="margin: 0 0 12px 0;"><strong>📍 Location:</strong><br>${properties.location}</p>
+                                <p style="margin: 0 0 12px 0;"><strong>📝 Description:</strong><br>${properties.description || 'No description provided'}</p>
+                            </div>
+                            
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px;">
+                                <div style="background: #f8f9fa; padding: 12px; border-radius: 6px;">
+                                    <strong>Status</strong><br>
+                                    <span style="color: ${statusColor}; font-weight: bold; font-size: 12px;">${properties.status.toUpperCase()}</span>
+                                </div>
+                                <div style="background: #f8f9fa; padding: 12px; border-radius: 6px;">
+                                    <strong>Department</strong><br>
+                                    <span style="font-size: 12px;">${properties.department ? properties.department.replace('_', ' ').toUpperCase() : 'N/A'}</span>
+                                </div>
+                            </div>
+                            
+                            <div style="font-size: 11px; color: #6c757d; margin-bottom: 20px;">
+                                Reported: ${new Date(properties.created_at).toLocaleString()}
+                                ${properties.has_image ? '<br>📸 Includes photo evidence' : ''}
+                            </div>
+                            
+                            <div style="display: flex; gap: 10px;">
+                                <a href="/admin" target="_blank" 
+                                   style="flex: 1; background: #007bff; color: white; padding: 10px; text-decoration: none; border-radius: 6px; text-align: center; font-size: 13px; font-weight: 500;">
+                                    View Details
+                                </a>
+                            </div>
                         </div>
-                    </div>
-                `;
+                    `;
+                    
+                    marker.bindPopup(popupContent);
+                    markers.addLayer(marker);
+                    currentMarkers.push(marker);
+                });
                 
-                marker.bindPopup(popupContent);
-                markers.addLayer(marker);
-            }});
+                map.addLayer(markers);
+                
+                // Auto-fit map to show all markers with padding
+                if (reports.length > 0) {
+                    var group = new L.featureGroup(currentMarkers);
+                    map.fitBounds(group.getBounds().pad(0.1));
+                }
+                
+                updateVisibleCount();
+            }
             
-            map.addLayer(markers);
+            // Filter reports by issue type
+            function filterReports(issueType) {
+                if (issueType === 'all') {
+                    updateMap(allReports);
+                } else {
+                    var filtered = allReports.filter(function(feature) {
+                        return feature.properties.issue_type === issueType;
+                    });
+                    updateMap(filtered);
+                }
+                
+                // Update active filter button
+                document.querySelectorAll('.filter-btn').forEach(btn => {
+                    btn.classList.remove('active');
+                });
+                event.target.classList.add('active');
+            }
             
-            // Auto-fit map to show all markers
-            if (reports.features.length > 0) {{
-                map.fitBounds(markers.getBounds(), {{ padding: [20, 20] }});
-            }}
+            // Update statistics
+            function updateStats() {
+                document.getElementById('total-reports').textContent = allReports.length;
+                document.getElementById('last-updated').textContent = new Date().toLocaleTimeString();
+            }
+            
+            function updateVisibleCount() {
+                document.getElementById('visible-reports').textContent = currentMarkers.length;
+            }
+            
+            // Auto-refresh every 30 seconds
+            setInterval(loadReports, 30000);
             
             // Add legend
-            var legend = L.control({{position: 'bottomright'}});
-            legend.onAdd = function(map) {{
+            var legend = L.control({position: 'bottomright'});
+            legend.onAdd = function(map) {
                 var div = L.DomUtil.create('div', 'legend');
-                div.innerHTML = '<h4>Issue Types</h4>';
-                for (var issue in issueStyles) {{
-                    div.innerHTML += '<div style="margin: 5px 0;"><span style="font-size: 20px; margin-right: 5px;">' + issueStyles[issue].icon + '</span> ' + issue + '</div>';
-                }}
-                div.innerHTML += '<h4 style="margin-top: 15px;">Status</h4>';
-                for (var status in statusColors) {{
-                    div.innerHTML += '<div style="margin: 5px 0;"><span style="display: inline-block; width: 15px; height: 15px; background: ' + statusColors[status] + '; margin-right: 5px;"></span> ' + status + '</div>';
-                }}
+                div.innerHTML = '<h4 style="margin: 0 0 15px 0; font-size: 16px;">Issue Types</h4>';
+                for (var issue in issueStyles) {
+                    div.innerHTML += `
+                        <div class="legend-item">
+                            <div class="legend-color" style="background: ${issueStyles[issue].color}"></div>
+                            <span>${issueStyles[issue].emoji} ${issueStyles[issue].name}</span>
+                        </div>
+                    `;
+                }
+                div.innerHTML += '<h4 style="margin: 15px 0 10px 0; font-size: 16px;">Status Colors</h4>';
+                for (var status in statusColors) {
+                    div.innerHTML += `
+                        <div class="legend-item">
+                            <div class="legend-color" style="background: ${statusColors[status]}"></div>
+                            <span>${status.replace('-', ' ').toUpperCase()}</span>
+                        </div>
+                    `;
+                }
                 return div;
-            }};
+            };
             legend.addTo(map);
+            
+            // Initialize
+            loadReports();
+            
+            // Add event listeners for filter buttons
+            document.querySelectorAll('.filter-btn').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    filterReports(this.getAttribute('data-issue'));
+                });
+            });
         </script>
     </body>
     </html>
     '''
     
-
-@app.route('/debug-routes')
-def debug_routes():
-    routes = []
-    for rule in app.url_map.iter_rules():
-        routes.append({
-            'endpoint': rule.endpoint,
-            'methods': list(rule.methods),
-            'path': rule.rule
-        })
+# Data Management API Endpoints
+@app.route('/admin/api/reports')
+def admin_api_reports():
+    """API endpoint for report management"""
+    page = request.args.get('page', 1, type=int)
+    status = request.args.get('status')
+    issue_type = request.args.get('issue_type')
+    search = request.args.get('search')
     
-    html = "<h1>Registered Routes:</h1><ul>"
-    for route in routes:
-        html += f"<li><strong>{route['path']}</strong> - {route['methods']}</li>"
-    html += "</ul>"
-    return html
+    filters = {}
+    if status: filters['status'] = status
+    if issue_type: filters['issue_type'] = issue_type
+    if search: filters['search'] = search
+    
+    result = db_manager.get_reports(filters=filters, page=page, per_page=20)
+    
+    # Generate HTML for the table
+    html = '''
+    <div class="table-responsive">
+        <table class="table table-striped">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Issue Type</th>
+                    <th>Location</th>
+                    <th>Status</th>
+                    <th>Department</th>
+                    <th>Created</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+    '''
+    
+    for report in result['reports']:
+        html += f'''
+            <tr>
+                <td>#{report['id']}</td>
+                <td>{report['issue_type'].replace('_', ' ').title()}</td>
+                <td>{report['location']}</td>
+                <td>
+                    <span class="badge bg-{{
+                        'received': 'warning',
+                        'in-progress': 'info', 
+                        'resolved': 'success'
+                    }}[report['status']]">{report['status']}</span>
+                </td>
+                <td>{report.get('department', '').replace('_', ' ').title()}</td>
+                <td>{report['created_at'][:16].replace('T', ' ')}</td>
+                <td>
+                    <a href="/admin/report/{report['id']}" class="btn btn-sm btn-outline-primary">View</a>
+                    <button class="btn btn-sm btn-outline-success" onclick="updateStatus({report['id']}, 'resolved')">Resolve</button>
+                </td>
+            </tr>
+        '''
+    
+    html += '''
+            </tbody>
+        </table>
+    </div>
+    
+    <!-- Pagination -->
+    <nav>
+        <ul class="pagination">
+    '''
+    
+    pagination = result['pagination']
+    for p in range(1, pagination['total_pages'] + 1):
+        active = 'active' if p == pagination['page'] else ''
+        html += f'<li class="page-item {active}"><a class="page-link" href="#" onclick="loadReports({p})">{p}</a></li>'
+    
+    html += '''
+        </ul>
+    </nav>
+    '''
+    
+    return jsonify({'html': html, 'pagination': result['pagination']})
+
+@app.route('/admin/export/<format_type>')
+def admin_export(format_type):
+    """Export data in various formats"""
+    if format_type == 'csv':
+        filename = db_manager.export_to_csv()
+        return send_file(filename, as_attachment=True)
+    elif format_type == 'json':
+        filename = db_manager.export_to_json()
+        return send_file(filename, as_attachment=True)
+    elif format_type == 'excel':
+        filename = db_manager.export_to_excel()
+        if filename:
+            return send_file(filename, as_attachment=True)
+        else:
+            return "Excel export not available", 400
+    else:
+        return "Invalid format", 400
+
+@app.route('/admin/backup')
+def admin_backup():
+    """Create database backup"""
+    filename = db_manager.backup_database()
+    return send_file(filename, as_attachment=True)
+
+@app.route('/admin/cleanup')
+def admin_cleanup():
+    """Cleanup old data"""
+    affected = db_manager.cleanup_old_data(days_to_keep=30)
+    return jsonify({'message': f'Archived {affected} old reports', 'affected': affected})
+
+@app.route('/admin/report/<int:report_id>')
+def admin_report_detail(report_id):
+    """Detailed report view"""
+    report = db_manager.get_report(report_id)
+    if not report:
+        return "Report not found", 404
+    
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Report #{{ report.id }}</title>
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    </head>
+    <body>
+        <div class="container mt-4">
+            <h2>Report #{{ report.id }}</h2>
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">{{ report.issue_type.replace('_', ' ').title() }}</h5>
+                    <p class="card-text"><strong>Description:</strong> {{ report.description }}</p>
+                    <p class="card-text"><strong>Location:</strong> {{ report.location }}</p>
+                    <p class="card-text"><strong>Status:</strong> <span class="badge bg-{{ 
+                        'warning' if report.status == 'received' else 
+                        'info' if report.status == 'in-progress' else 
+                        'success' 
+                    }}">{{ report.status }}</span></p>
+                    {% if report.image_url %}
+                    <img src="{{ report.image_url }}" class="img-fluid" style="max-height: 300px;">
+                    {% endif %}
+                </div>
+            </div>
+            <a href="/admin/advanced" class="btn btn-secondary mt-3">Back to Admin</a>
+        </div>
+    </body>
+    </html>
+    ''', report=report)
+
+
+@app.route('/admin/database-health')
+def database_health():
+    """Check database health and schema"""
+    try:
+        schema = migrator.get_database_schema()
+        stats = db_manager.get_dashboard_stats()
+        
+        return jsonify({
+            'status': 'healthy',
+            'schema': schema,
+            'stats': stats,
+            'required_columns': {
+                'reports': ['phone', 'issue_type', 'location', 'department', 'status'],
+                'departments': ['name', 'email', 'phone']
+            }
+        })
+    except Exception as e:
+        return jsonify({
+            'status': 'unhealthy',
+            'error': str(e)
+        }), 500
+
+
+# API endpoints for map data
+@app.route('/api/reports/geojson')
+def api_reports_geojson():
+    """API endpoint to get reports in GeoJSON format"""
+    from database import get_reports_geojson
+    return jsonify(get_reports_geojson())
+
+@app.route('/api/reports/stats')
+def api_reports_stats():
+    """API endpoint for report statistics"""
+    conn = sqlite3.connect('civicbot.db')
+    c = conn.cursor()
+    
+    c.execute("SELECT COUNT(*) FROM reports")
+    total_reports = c.fetchone()[0]
+    
+    c.execute("SELECT COUNT(*) FROM reports WHERE latitude IS NOT NULL AND longitude IS NOT NULL")
+    mapped_reports = c.fetchone()[0]
+    
+    c.execute("SELECT issue_type, COUNT(*) FROM reports GROUP BY issue_type")
+    issue_stats = dict(c.fetchall())
+    
+    conn.close()
+    
+    return jsonify({
+        'total_reports': total_reports,
+        'mapped_reports': mapped_reports,
+        'issue_stats': issue_stats,
+        'last_updated': datetime.now().isoformat()
+    })
+
 
 @app.route('/update_status', methods=['POST'])
 def update_status():
@@ -1154,6 +1908,25 @@ def update_status():
     </script>
     '''
 
+@app.route('/debug-routes')
+def debug_routes():
+    routes = []
+    for rule in app.url_map.iter_rules():
+        routes.append({
+            'endpoint': rule.endpoint,
+            'methods': list(rule.methods),
+            'path': rule.rule
+        })
+    
+    html = "<h1>Registered Routes:</h1><ul>"
+    for route in routes:
+        html += f"<li><strong>{route['path']}</strong> - {route['methods']}</li>"
+    html += "</ul>"
+    return html
+
+
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
+
